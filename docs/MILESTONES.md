@@ -6,7 +6,7 @@ until the current one is done.
 - [x] **1. Foundations** — repository, CI pipeline, local Kubernetes, PostgreSQL, Redis, Kafka, OpenTelemetry wired up.
 - [x] **2. Model gateway** — streaming passthrough to 2+ providers, API keys, fallback, circuit breakers, exact caching. First latency benchmark.
 - [x] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
-- [ ] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
+- [x] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
 - [ ] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
 - [ ] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
 - [ ] **7. Audit log** — hash chain, signed checkpoints, verification command.
@@ -49,3 +49,14 @@ until the current one is done.
 - [ ] Real token-exchange (RFC 8693) instead of the hardcoded-allowlist simplification — noted as a deliberate v1 simplification in DECISIONS.md, not a gap to silently carry forward.
 
 **Milestone 3: done** (simplification on token exchange documented, not hidden).
+
+## Milestone 4 progress
+
+- [x] Postgres introduced for the first time: `internal/db` runs embedded, versioned migrations (golang-migrate) on startup — not ad-hoc schema setup.
+- [x] `internal/registry`: pin-on-first-sight / block-on-change tool registry, unit-tested against a real migrated Postgres, including the "doesn't self-heal by reverting" behavior.
+- [x] `internal/mcpgateway`: Warden is itself an MCP server (`/mcp`, auth-gated same as the model endpoint) that proxies `tools/list`/`tools/call` to real upstream MCP servers, reconciling every listed tool against the registry.
+- [x] `cmd/demo-mcp-server`: a real MCP server (official Go SDK) standing in for a third-party one, with an env-var-controlled tool description for simulating a poisoning attempt on demand.
+- [x] Verified end-to-end with a real MCP client (not just unit tests): listed and called the proxied `echo` tool successfully through Warden; then restarted the upstream with a changed tool description and confirmed, after the periodic sync, that the tool disappeared from the list and calling it returned "unknown tool."
+- [x] Found and fixed a real bug during that verification: the upstream client session doesn't survive the upstream process restarting; added reconnect-on-failure to both the sync loop and the call-proxying path.
+
+**Milestone 4: done.**

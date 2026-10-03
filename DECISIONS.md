@@ -169,3 +169,50 @@ unenforced rather than the gateway refusing traffic. Revisit this choice
 specifically when the policy engine lands — that one should almost
 certainly fail *closed*, and the contrast between the two is itself a good
 interview answer about *where* fail-open is and isn't acceptable.
+
+## 2026-10-03 — Official MCP Go SDK, composite natural key for the tool registry
+
+**Options for the SDK:** the official `github.com/modelcontextprotocol/go-sdk`
+vs. a community alternative (e.g. `mark3labs/mcp-go`), or hand-rolling the
+JSON-RPC protocol.
+
+**Chose:** the official SDK, per the original spec's tech stack table. It
+provides both server (`mcp.NewServer`, `Server.AddTool`) and client
+(`mcp.NewClient`, `ClientSession.CallTool`) sides plus the Streamable HTTP
+transport, so Warden could be both an MCP server (to agents) and an MCP
+client (to upstreams) with one dependency.
+
+**Options for the registry key:** a generated UUID primary key (matching
+the original data-model sketch's generic `id` field) vs. a composite
+natural key of `(mcp_server, name)`.
+
+**Chose:** the composite key (`migrations/0001_create_tools.up.sql`).
+
+**Why:** a tool is only ever looked up by "which server, which tool name" —
+every call site already has both. A surrogate UUID would add a layer of
+indirection (look up the UUID, then use it) for no actual benefit here,
+and the composite key is also exactly what enforces "one row per real
+tool" as a database constraint instead of application logic.
+
+**Cost:** if tools ever need to be renamed while preserving history, a
+natural key makes that a bigger operation (the key itself changes) than it
+would be with a surrogate key. Not a concern for v1.
+
+## 2026-10-03 — Found via live testing: upstream session doesn't survive a restart
+
+**What happened:** while verifying the tool-poisoning detection by
+restarting the demo MCP server with a changed description, the gateway's
+periodic sync failed with "session not found" — the previously-established
+MCP client session died when its upstream process restarted (a new
+process means a new SSE session on the wire), and nothing was reconnecting.
+
+**Fix:** `mcpgateway.Gateway` now remembers each upstream's `UpstreamConfig`
+and, on any `ListTools`/`CallTool` failure, attempts exactly one reconnect
+before giving up — turning "upstream restarted" into a brief gap instead
+of a permanent failure that needed a gateway restart to clear.
+
+**Why this is worth a DECISIONS.md entry on its own:** it's a concrete,
+true example of why milestone benchmarks/tests have to involve actually
+*running* the thing, not just reading the code — this bug was invisible
+in both the unit tests and a first read-through, and only showed up when
+an upstream was deliberately restarted mid-session.

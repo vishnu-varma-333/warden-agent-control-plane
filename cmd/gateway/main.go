@@ -13,13 +13,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/redis/go-redis/v9"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/mcpgateway"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider/mock"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/router"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -99,10 +103,39 @@ func main() {
 
 	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache, RateLimit: limiter, Budget: budgetEnforcer}
 
+	pgDSN := os.Getenv("DATABASE_URL")
+	if pgDSN == "" {
+		pgDSN = "postgres://warden:warden@localhost:5432/warden?sslmode=disable"
+	}
+	pgConn, err := db.Connect(pgDSN)
+	if err != nil {
+		slog.Error("database connect/migrate failed", "error", err)
+		os.Exit(1)
+	}
+	defer pgConn.Close()
+
+	toolRegistry := registry.New(pgConn)
+	mcpGW := mcpgateway.New(toolRegistry, &mcp.Implementation{Name: "warden", Version: "v1"})
+
+	demoMCPAddr := os.Getenv("DEMO_MCP_URL")
+	if demoMCPAddr == "" {
+		demoMCPAddr = "http://localhost:9090"
+	}
+	if err := mcpGW.ConnectUpstream(ctx, mcpgateway.UpstreamConfig{Name: "demo-tools", URL: demoMCPAddr}); err != nil {
+		// Non-fatal: the model gateway is still useful with no tools
+		// connected yet, and periodic sync will pick the upstream up once
+		// it's reachable. See DECISIONS.md.
+		slog.Error("mcp upstream connect failed; continuing without it", "error", err)
+	}
+	mcpGW.StartPeriodicSync(ctx, 30*time.Second)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/readyz", handleReadyz)
 	mux.Handle("/v1/chat/completions", identity.Middleware(verifier)(chatHandler))
+	mux.Handle("/mcp", identity.Middleware(verifier)(mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return mcpGW.Server() }, nil,
+	)))
 
 	srv := &http.Server{
 		Addr:         addr,
