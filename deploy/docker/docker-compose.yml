@@ -38,7 +38,16 @@ services:
       - --node-id=0
       - --check=false
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      # localhost, not the "redpanda" service DNS name: every Warden binary
+      # in this project runs on the host, not as a container, unlike the
+      # k8s-local setup (deploy/k8s-local/redpanda.yaml) where the reverse
+      # is true and the service DNS name is correct. A Kafka client's
+      # first connection can succeed via the host-mapped port regardless,
+      # but every subsequent produce/consume is redirected to whatever
+      # address is advertised here — "redpanda:9092" doesn't resolve on
+      # the host, so it hangs rather than erroring. Found live during
+      # milestone 7 verification: ProduceSync never returned.
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
     ports:
       - "9092:9092"
     healthcheck:

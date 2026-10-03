@@ -67,3 +67,34 @@ lost, 0 duplicated — across this test. A statistical 1,000-run version of
 the same scenario (automated, looped) is tracked as a follow-up for the
 milestone 10 benchmark pass, where it belongs alongside the other
 fault-injection suites.
+
+## Audit verification (milestone 7)
+
+**Spec target:** "Audit verification — time to verify N million records —
+report the number."
+
+**Result (2026-10-03), at today's real scale (5 records, live dev
+chain):**
+
+| Verification | Records checked | Time |
+|---|---|---|
+| Full (from genesis) | 5 | 9.2 ms |
+| Fast path (from latest signed checkpoint) | 1 | 1.0 ms |
+
+**What this actually demonstrates:** not a meaningful N-million-record
+number yet (there's no production traffic generating millions of
+decisions), but the *mechanism* the spec's benchmark is really asking
+about — that checkpoint-based verification is a real optimization, not
+just a design on paper. The fast path correctly verified only the record
+*after* the latest checkpoint instead of re-walking the whole chain, after
+first verifying the checkpoint's Ed25519 signature. Both the full-chain
+tamper detection (edited/deleted/reordered records, each independently
+unit-tested) and this checkpoint fast path were also proven live against
+a running gateway, not just in isolated tests — see DECISIONS.md for the
+three real bugs that live run surfaced along the way.
+
+**Honest scope note:** a real "N million records, how long does
+verification take" number needs either a synthetic load generator seeding
+millions of rows, or real accumulated production traffic — both belong in
+the milestone 10 benchmark pass, tracked explicitly rather than
+extrapolated from 5 records here.

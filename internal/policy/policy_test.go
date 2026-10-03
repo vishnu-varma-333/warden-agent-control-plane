@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
 )
 
@@ -41,7 +42,7 @@ func newTestEngine(t *testing.T, source string) *Engine {
 	version := uniqueVersion(t)
 	deactivateAllAndInsert(t, conn, version, source)
 
-	e := New(conn, rdb)
+	e := New(conn, rdb, audit.NoopProducer{})
 	if err := e.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh failed: %v", err)
 	}

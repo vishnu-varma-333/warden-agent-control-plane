@@ -371,6 +371,108 @@ very large number of simultaneously-pending approvals the way a
 notify-based wakeup would. Worth revisiting if that ever becomes a real
 number instead of a hypothetical one.
 
+## 2026-10-03 — Found via live testing: Postgres round-trips a timestamp through a different timezone, breaking every hash
+
+**What happened:** every single `Verify` call failed, including on chains
+with zero actual tampering — `TestVerifyPassesOnAnUntamperedChain` and
+three others all failed identically right after being written. The hash
+the writer computed and the hash the verifier recomputed from the exact
+same stored row disagreed, for every record, every time.
+
+**Root cause, found with a minimal isolated repro (not a guess):** pgx's
+`stdlib` driver decodes a `TIMESTAMPTZ` column back as `time.Time` in the
+*server process's local timezone* (IST on this machine), not UTC.
+`time.Time.Equal()` still returns true (it's genuinely the same instant),
+but `json.Marshal`'s RFC3339 output differs by `Location`
+(`"...Z"` vs `"...+05:30"`) — and the hash is computed over that JSON
+string, so two representations of the identical instant hash completely
+differently. A second, smaller issue compounded it: Postgres
+`TIMESTAMPTZ` only stores microsecond precision, while `time.Now()` is
+nanosecond-precision, so even same-timezone round-trips would eventually
+mismatch too.
+
+**Fix:** `ComputeHash` (`internal/audit/record.go`) now normalizes with
+`.UTC()` before hashing — in the one function both the writer and the
+verifier call, not scattered across call sites where it's easy to forget
+at one of them. `ChainWriter.Append` additionally truncates to
+microsecond precision before hashing, matching what Postgres will
+actually store.
+
+**Why this one matters more than a typical bug:** this wasn't a
+local-dev-only quirk — it would have made the audit log report **every
+single record as tampered** on any machine not running in UTC, which is
+most of them. A tamper-evidence system that cries wolf on legitimate data
+is worse than no tamper-evidence system: it trains whoever's watching to
+ignore the alarm. Caught here because the test suite runs for real against
+a real Postgres on a non-UTC machine — it would not have been caught by
+tests that mock the database or that happen to run in UTC (e.g. most CI
+runners' default timezone).
+
+## 2026-10-03 — Found via live testing: an async Kafka publish used the wrong context and silently failed on every call
+
+**What happened:** real policy decisions were being made correctly, but
+zero records ever reached the audit chain, with no errors visible in
+in the main request-handling log lines — only once the promise callback's
+own log line was checked did `"audit: publish failed", "error":"context
+canceled"` show up, on every single publish.
+
+**Root cause:** `Producer.Publish` initially called `kgo.Client.Produce`
+with the *caller's* `ctx` — the HTTP request's context. `Produce` is
+asynchronous: it returns immediately and the actual network send happens
+later, often after the originating HTTP handler has already returned,
+at which point `net/http` has already cancelled that request's context.
+The send then fails against an already-cancelled context, every time.
+
+**Fix:** `KafkaProducer` now takes a separate, long-lived `bgCtx` at
+construction (the gateway's own top-level context, cancelled only on
+shutdown) and uses that for the actual `Produce` call, ignoring the
+per-call `ctx` entirely (`internal/audit/producer.go`).
+
+**Why worth recording:** "fire-and-forget, off the hot path" is the
+entire architectural point of routing audit events through Kafka instead
+of a synchronous Postgres write (see the original tech-stack reasoning).
+Wiring that pattern with the wrong context quietly defeats it in exactly
+the way that's hardest to notice — no error at the call site, no crash,
+just an audit log that silently never fills up. This is a general trap
+worth remembering for any other fire-and-forget async work added later:
+a context from a request is scoped to that request's lifetime, not to
+"this background work I kicked off and no longer care about the result
+of" — those need their own, separately-scoped context.
+
+## 2026-10-03 — Found via live testing: Redpanda's advertised address was unreachable from host-run binaries
+
+**What happened:** after fixing the context bug above, publishes still
+silently went nowhere — no error, `ProduceSync` in an isolated debug
+script simply hung forever, and the topic's high-watermark stayed at 0
+no matter how many records were "successfully" produced.
+
+**Root cause:** `deploy/docker/docker-compose.yml` advertised Redpanda at
+`redpanda:9092` — correct for another *container* on the same Docker
+network, but every Warden binary in this project runs directly on the
+host (`go run`/built binaries), not containerized. A Kafka client's
+bootstrap connection succeeds via the host-mapped port (`localhost:9092`
+works fine for the initial metadata fetch), but the metadata response
+then tells the client the *real* address to use for actual produce/fetch
+requests — and `redpanda` doesn't resolve on the host, so those requests
+hang indefinitely instead of failing with a clear error.
+
+**Fix:** changed the advertised address to `localhost:9092`
+(`deploy/docker/docker-compose.yml`). Also added
+`kgo.AllowAutoTopicCreation()` so a fresh environment doesn't need a
+manual `rpk topic create` step — though real topic provisioning belongs
+in Terraform alongside the rest of the AWS infra (milestone 10), not
+runtime auto-creation.
+
+**Why this is the same lesson as the Redpanda-in-Kubernetes entry from
+milestone 1, just mirrored:** there, the fix was using the *cluster* DNS
+name because other pods resolve through cluster DNS, not `localhost`.
+Here, the fix is the opposite, because the clients are on the host, not
+in containers. The general principle is the same both times: an
+advertised address has to be reachable from wherever the actual client
+runs, and "it connects initially" is not evidence that it works — the
+failure mode for a wrong advertised address is specifically that the
+*first* connection succeeds and everything after it quietly doesn't.
+
 ## 2026-10-03 — Found via design review: policy must run before the cache lookup
 
 **What was wrong:** `internal/cache`'s response cache (milestone 2) is

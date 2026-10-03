@@ -20,6 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 )
 
 const (
@@ -67,10 +70,23 @@ type Notifier interface {
 type Manager struct {
 	db       *sql.DB
 	notifier Notifier
+	audit    audit.Producer // nil is valid: audit publishing is then skipped
 }
 
-func New(db *sql.DB, notifier Notifier) *Manager {
-	return &Manager{db: db, notifier: notifier}
+func New(db *sql.DB, notifier Notifier, auditProducer audit.Producer) *Manager {
+	return &Manager{db: db, notifier: notifier, audit: auditProducer}
+}
+
+func (m *Manager) publishAudit(ctx context.Context, approvalID, decision, decidedBy string, snap CallSnapshot) {
+	if m.audit == nil {
+		return
+	}
+	m.audit.Publish(ctx, audit.Event{
+		EventID: uuid.NewString(), Decision: decision, Reason: "decided_by=" + decidedBy,
+		AgentID: snap.AgentID, ActingAs: snap.ActingAs, Action: snap.Action,
+		ResourceType: snap.ResourceType, ResourceID: snap.ResourceID,
+		PayloadRef: "approval-" + approvalID, OccurredAt: time.Now(),
+	})
 }
 
 // SeedRuleIfMissing registers (action, resourceType, resourceID) as
@@ -184,12 +200,27 @@ func (m *Manager) getState(ctx context.Context, approvalID string) (string, erro
 	return state, nil
 }
 
+// expireOne also publishes an audit event, not just ExpireOverdue's bulk
+// sweep — without this, an approval that nobody ever waited past its
+// deadline for (so only the periodic sweep would otherwise catch it) could
+// instead be lazily expired here first, and the sweep's WHERE state =
+// 'pending' would then never see it again, silently losing the audit
+// trail for that expiry.
 func (m *Manager) expireOne(ctx context.Context, approvalID string) error {
-	_, err := m.db.ExecContext(ctx,
-		`UPDATE approvals SET state = $1, updated_at = now() WHERE id = $2 AND state = $3`,
+	var snap CallSnapshot
+	err := m.db.QueryRowContext(ctx,
+		`UPDATE approvals SET state = $1, updated_at = now() WHERE id = $2 AND state = $3
+		 RETURNING agent_id, acting_as, action, resource_type, resource_id`,
 		StateExpired, approvalID, StatePending,
-	)
-	return err
+	).Scan(&snap.AgentID, &snap.ActingAs, &snap.Action, &snap.ResourceType, &snap.ResourceID)
+	if err == sql.ErrNoRows {
+		return nil // already decided/expired by someone else first; not an error
+	}
+	if err != nil {
+		return err
+	}
+	m.publishAudit(ctx, approvalID, StateExpired, "", snap)
+	return nil
 }
 
 // Decide records a human decision. The WHERE state = 'pending' clause
@@ -200,21 +231,20 @@ func (m *Manager) Decide(ctx context.Context, approvalID, state, decidedBy strin
 	if state != StateApproved && state != StateRejected {
 		return fmt.Errorf("approval: invalid decision state %q", state)
 	}
-	res, err := m.db.ExecContext(ctx,
+	var snap CallSnapshot
+	err := m.db.QueryRowContext(ctx,
 		`UPDATE approvals SET state = $1, decided_by = $2, updated_at = now()
-		 WHERE id = $3 AND state = $4`,
+		 WHERE id = $3 AND state = $4
+		 RETURNING agent_id, acting_as, action, resource_type, resource_id`,
 		state, decidedBy, approvalID, StatePending,
-	)
-	if err != nil {
-		return fmt.Errorf("approval: decide: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("approval: decide: %w", err)
-	}
-	if n == 0 {
+	).Scan(&snap.AgentID, &snap.ActingAs, &snap.Action, &snap.ResourceType, &snap.ResourceID)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("approval: %s is not pending (already decided, or doesn't exist)", approvalID)
 	}
+	if err != nil {
+		return fmt.Errorf("approval: decide: %w", err)
+	}
+	m.publishAudit(ctx, approvalID, state, decidedBy, snap)
 	return nil
 }
 
@@ -241,14 +271,27 @@ func (m *Manager) ClaimExecution(ctx context.Context, approvalID string) (claime
 // Call it periodically; WaitForDecision also expires lazily on read, so
 // this sweep mainly catches approvals nobody is actively waiting on.
 func (m *Manager) ExpireOverdue(ctx context.Context) (int64, error) {
-	res, err := m.db.ExecContext(ctx,
-		`UPDATE approvals SET state = $1, updated_at = now() WHERE state = $2 AND expires_at < now()`,
+	rows, err := m.db.QueryContext(ctx,
+		`UPDATE approvals SET state = $1, updated_at = now() WHERE state = $2 AND expires_at < now()
+		 RETURNING id, agent_id, acting_as, action, resource_type, resource_id`,
 		StateExpired, StatePending,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("approval: expire sweep: %w", err)
 	}
-	return res.RowsAffected()
+	defer rows.Close()
+
+	var n int64
+	for rows.Next() {
+		var id string
+		var snap CallSnapshot
+		if err := rows.Scan(&id, &snap.AgentID, &snap.ActingAs, &snap.Action, &snap.ResourceType, &snap.ResourceID); err != nil {
+			return n, fmt.Errorf("approval: expire sweep scan: %w", err)
+		}
+		m.publishAudit(ctx, id, StateExpired, "", snap)
+		n++
+	}
+	return n, rows.Err()
 }
 
 // Get returns the full detail row for one approval.

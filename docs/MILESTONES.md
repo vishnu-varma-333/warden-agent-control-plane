@@ -9,7 +9,7 @@ until the current one is done.
 - [x] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
 - [x] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
 - [x] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
-- [ ] **7. Audit log** — hash chain, signed checkpoints, verification command.
+- [x] **7. Audit log** — hash chain, signed checkpoints, verification command.
 - [ ] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
 - [ ] **9. Console** — tools, policies, approvals, audit and spend views.
 - [ ] **10. Ship it** — AWS deploy with Terraform, full load and fault test reports, demo video, docs site, write-up.
@@ -86,6 +86,20 @@ until the current one is done.
 - [ ] Statistical 1,000-run kill-test benchmark (vs. this milestone's one fully-reasoned kill test) — tracked as a follow-up for the milestone 10 benchmark pass.
 
 **Milestone 6: done** (1,000-run statistical benchmark explicitly deferred, not silently skipped).
+
+## Milestone 7 progress
+
+- [x] `internal/audit`: SHA-256 hash chain in Postgres (`Record`/`ComputeHash` shared by writer and verifier — one definition of "what gets hashed", not two that could drift). Appends serialized via a locked singleton row, correct under concurrency (tested with 25 concurrent goroutines under `-race`).
+- [x] Decisions reach the chain via Kafka/Redpanda, off the hot path — `audit.Producer` (`policy.Engine`, `approval.Manager`) publishes async; a single `ChainWriter` consumer appends. At-least-once delivery handled via `event_id` dedup, verified with a redelivery test.
+- [x] Ed25519-signed periodic checkpoints (`internal/audit/checkpoint.go`) and a fast verification path that trusts a checkpoint's signature instead of re-walking the whole chain — unit-tested, and the speedup (9.2ms full vs. 1.0ms fast-path on today's small chain) demonstrated live, not just in isolation.
+- [x] `cmd/wardenctl`: real CLI, `wardenctl audit verify [--from-checkpoint]` — exits non-zero on a broken chain, usable in scripts/CI.
+- [x] Verified end-to-end against a live, running gateway (not just unit tests): real policy decisions flowed through Kafka into a correctly-chained log; `wardenctl` verified it clean; a record was tampered with directly in Postgres (bypassing the application entirely) and `wardenctl` caught it, pinpointing the exact seq; a wrong public key was correctly rejected for checkpoint fast-path verification.
+- [x] Found and fixed **three** real bugs during this milestone's own live verification (all in DECISIONS.md) — none were caught by unit tests alone, each only surfaced by actually running the full system: (1) a timezone/precision mismatch in how `time.Time` round-trips through Postgres made every untampered record look tampered; (2) the async Kafka publish used the triggering HTTP request's context, which gets cancelled before the actual send happens, so every publish silently failed; (3) Redpanda's advertised address pointed at a Docker-internal hostname unreachable from the host-run Go binaries, causing produces to hang with zero error.
+- [ ] DB-level write prevention (a trigger or REVOKE blocking UPDATE/DELETE on `audit_events`) — deliberately scoped out of v1; the hash chain's job is *detection* (which the spec explicitly asks for: "proves no record was edited, removed, or reordered"), prevention is a complementary hardening layer, not yet added. Tracked, not hidden.
+- [ ] Wardenctl's broader command surface (`policy validate/diff/apply` from the original spec) — only `audit verify` exists; the rest waits for the console (milestone 9) to have something to drive it against.
+- [ ] Real N-million-record verification-time benchmark — only a 5-record live number exists so far; a synthetic/soak version is tracked for milestone 10.
+
+**Milestone 7: done** (both open items above are explicit, tracked scope decisions, not oversights).
 
 ## Spec completeness check (2026-10-03, after milestone 4)
 

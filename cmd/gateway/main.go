@@ -4,18 +4,22 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/redis/go-redis/v9"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
@@ -114,7 +118,30 @@ func main() {
 	}
 	defer pgConn.Close()
 
-	policyEngine := policy.New(pgConn, redisClient)
+	redpandaBrokers := strings.Split(envOr("REDPANDA_BROKERS", "localhost:9092"), ",")
+	const auditTopic = "warden.audit.events"
+
+	auditProducer, err := audit.NewKafkaProducer(ctx, redpandaBrokers, auditTopic)
+	if err != nil {
+		slog.Error("audit producer init failed", "error", err)
+		os.Exit(1)
+	}
+	defer auditProducer.Close()
+
+	signingKey := loadOrGenerateAuditSigningKey()
+
+	chainWriter, err := audit.NewChainWriter(pgConn, redpandaBrokers, auditTopic)
+	if err != nil {
+		slog.Error("audit chain writer init failed", "error", err)
+		os.Exit(1)
+	}
+	defer chainWriter.Close()
+	go chainWriter.Run(ctx)
+
+	checkpointer := audit.NewCheckpointer(pgConn, signingKey)
+	checkpointer.StartPeriodic(ctx, 60*time.Second)
+
+	policyEngine := policy.New(pgConn, redisClient, auditProducer)
 	if err := policyEngine.SeedIfEmpty(ctx); err != nil {
 		slog.Error("policy seed failed", "error", err)
 		os.Exit(1)
@@ -137,7 +164,7 @@ func main() {
 	} else {
 		approvalNotifier = &approval.LogNotifier{ControlAPIBaseURL: controlAPIBaseURL}
 	}
-	approvalManager := approval.New(pgConn, approvalNotifier)
+	approvalManager := approval.New(pgConn, approvalNotifier, auditProducer)
 	if err := approvalManager.SeedRuleIfMissing(ctx, "CallTool", "Tool", "delete_data"); err != nil {
 		slog.Error("approval rule seed failed", "error", err)
 		os.Exit(1)
@@ -217,6 +244,42 @@ func initIdentityVerifier(ctx context.Context, issuer string) (*identity.Verifie
 		}
 	}
 	return nil, lastErr
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// loadOrGenerateAuditSigningKey reads a persistent Ed25519 seed from
+// WARDEN_AUDIT_SIGNING_KEY if set, or generates a fresh one and logs its
+// public key. This is a known, stated gap, not a silent one: a freshly
+// generated key on every restart means checkpoints signed before a restart
+// can't be verified against the new public key afterward. The real fix is
+// loading this from a secrets manager (already tracked as a broader
+// production-readiness gap in docs/MILESTONES.md's spec-completeness
+// section) — local dev doesn't need that machinery, but should still make
+// the limitation visible rather than quietly signing with throwaway keys.
+func loadOrGenerateAuditSigningKey() ed25519.PrivateKey {
+	if seedHex := os.Getenv("WARDEN_AUDIT_SIGNING_KEY"); seedHex != "" {
+		seed, err := hex.DecodeString(seedHex)
+		if err != nil || len(seed) != ed25519.SeedSize {
+			slog.Error("invalid WARDEN_AUDIT_SIGNING_KEY, must be a hex-encoded 32-byte seed", "error", err)
+			os.Exit(1)
+		}
+		return ed25519.NewKeyFromSeed(seed)
+	}
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		slog.Error("generate audit signing key failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Warn("no WARDEN_AUDIT_SIGNING_KEY set; generated an ephemeral one for this process",
+		"publicKey", hex.EncodeToString(pub),
+		"note", "checkpoints signed this run won't verify after a restart unless this exact key is persisted and reused")
+	return priv
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

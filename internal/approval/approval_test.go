@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
 )
 
@@ -46,7 +47,7 @@ func newTestManager(t *testing.T) (*Manager, *recordingNotifier, *sql.DB) {
 	})
 
 	notifier := &recordingNotifier{}
-	return New(conn, notifier), notifier, conn
+	return New(conn, notifier, audit.NoopProducer{}), notifier, conn
 }
 
 func testSnapshot(t *testing.T) CallSnapshot {

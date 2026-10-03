@@ -21,7 +21,9 @@ import (
 
 	"github.com/cedar-policy/cedar-go"
 	"github.com/cedar-policy/cedar-go/types"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 )
 
 // DefaultSeedPolicy is installed only if the policies table is empty, so a
@@ -68,6 +70,7 @@ type Decision struct {
 type Engine struct {
 	db    *sql.DB
 	cache *redis.Client
+	audit audit.Producer // nil is valid: audit publishing is then skipped, not a crash (see Authorize)
 
 	mu        sync.RWMutex
 	compiled  *cedar.PolicySet
@@ -75,8 +78,8 @@ type Engine struct {
 	everReady bool
 }
 
-func New(db *sql.DB, cache *redis.Client) *Engine {
-	return &Engine{db: db, cache: cache}
+func New(db *sql.DB, cache *redis.Client, auditProducer audit.Producer) *Engine {
+	return &Engine{db: db, cache: cache, audit: auditProducer}
 }
 
 // SeedIfEmpty installs DefaultSeedPolicy as version 1 only if no policy
@@ -165,13 +168,16 @@ func (e *Engine) Authorize(ctx context.Context, agentID, actingAsUser, action, r
 	if !ready {
 		slog.Error("policy decision: DENY (fail-closed, no policy ever loaded)",
 			"agent", agentID, "action", action, "resource", resourceType+"::"+resourceID)
-		return Decision{Allow: false, Reasons: []string{"no policy loaded"}}, nil
+		d := Decision{Allow: false, Reasons: []string{"no policy loaded"}}
+		e.publishAudit(ctx, d, agentID, actingAsUser, action, resourceType, resourceID)
+		return d, nil
 	}
 
 	cacheKey := decisionCacheKey(version, agentID, actingAsUser, action, resourceType, resourceID)
 	if cached, hit := e.getCached(ctx, cacheKey); hit {
 		cached.CacheHit = true
 		logDecision(cached, agentID, actingAsUser, action, resourceType, resourceID)
+		e.publishAudit(ctx, cached, agentID, actingAsUser, action, resourceType, resourceID)
 		return cached, nil
 	}
 
@@ -202,7 +208,25 @@ func (e *Engine) Authorize(ctx context.Context, agentID, actingAsUser, action, r
 
 	e.setCached(ctx, cacheKey, decision)
 	logDecision(decision, agentID, actingAsUser, action, resourceType, resourceID)
+	e.publishAudit(ctx, decision, agentID, actingAsUser, action, resourceType, resourceID)
 	return decision, nil
+}
+
+func (e *Engine) publishAudit(ctx context.Context, d Decision, agentID, actingAsUser, action, resourceType, resourceID string) {
+	if e.audit == nil {
+		return
+	}
+	result := "deny"
+	if d.Allow {
+		result = "allow"
+	}
+	e.audit.Publish(ctx, audit.Event{
+		EventID: uuid.NewString(), Decision: result, Reason: fmt.Sprint(d.Reasons),
+		AgentID: agentID, ActingAs: actingAsUser, Action: action,
+		ResourceType: resourceType, ResourceID: resourceID,
+		PayloadRef: fmt.Sprintf("policy-v%d", d.PolicyVersion),
+		OccurredAt:  time.Now(),
+	})
 }
 
 func logDecision(d Decision, agentID, actingAsUser, action, resourceType, resourceID string) {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
@@ -65,7 +66,20 @@ func main() {
 	} else {
 		notifier = &approval.LogNotifier{ControlAPIBaseURL: controlAPIBaseURL}
 	}
-	approvalManager := approval.New(pgConn, notifier)
+	// control-api publishes to the same Kafka topic the gateway's single
+	// chain writer consumes from — any process that makes a decision can
+	// be an audit producer; the chain itself only ever has one writer
+	// (serialized via the Postgres row lock, not by process count). See
+	// DECISIONS.md.
+	redpandaBrokers := []string{envOr("REDPANDA_BROKERS", "localhost:9092")}
+	auditProducer, err := audit.NewKafkaProducer(ctx, redpandaBrokers, "warden.audit.events")
+	if err != nil {
+		slog.Error("audit producer init failed", "error", err)
+		os.Exit(1)
+	}
+	defer auditProducer.Close()
+
+	approvalManager := approval.New(pgConn, notifier, auditProducer)
 	approvalManager.StartExpirySweep(ctx, 10*time.Second)
 
 	approvalsHandler := &httpapi.ApprovalsHandler{Manager: approvalManager}
@@ -103,6 +117,13 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("control-api stopped cleanly")
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
