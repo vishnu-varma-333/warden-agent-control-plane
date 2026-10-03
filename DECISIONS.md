@@ -80,3 +80,45 @@ teach how *not* to do it.
 actually works end-to-end (not just "compiles"): ran the gateway against the
 live collector, hit `/healthz` twice, queried Jaeger's API directly, and
 confirmed two `gateway` spans arrived.
+
+## 2026-10-03 — Mock provider now, real provider deferred
+
+**Options:** wire a real provider (OpenAI/Anthropic/etc.) immediately for
+milestone 2, vs. build and verify all the gateway logic (routing, fallback,
+breaker, caching, streaming) against a mock first.
+
+**Chose:** mock first (`internal/provider/mock`) — two instances
+(`mock-primary`, `mock-secondary`) wired into one route. Real provider
+adapters are a drop-in later: anything implementing `provider.Provider`
+plugs into the same router.
+
+**Why:** every behavior milestone 2 needs to prove — fallback, the circuit
+breaker, exact-match caching, streaming — is about the gateway's own logic,
+not about any specific vendor's API. A mock makes failure deterministic
+(flip `SetUnhealthy(true)`, no need to actually take a real provider down)
+and free to run repeatedly, including for the benchmark, where a real
+provider's network latency would swamp the number actually being measured
+(the gateway's own overhead).
+
+**Cost:** nothing yet proves the real provider adapter's HTTP/SDK handling
+works — that's new code still to write once an API key is supplied. The
+`provider.Provider` interface is the seam designed to make that addition
+not require touching the router, cache, or HTTP handler.
+
+## 2026-10-03 — Streaming fallback only applies before the stream starts
+
+**Decision:** `Router.ChatStream` tries providers in order but commits to
+the first one whose *initial* call succeeds; it never switches providers
+mid-stream.
+
+**Why:** once bytes have been flushed to the HTTP client as SSE events,
+there's no way to retract them — switching providers mid-stream would mean
+either duplicating already-sent content or silently corrupting the
+response. Real proxies (and the spec's own "streaming through a proxy"
+talking point) hit this same constraint.
+
+**Cost:** if a provider fails *after* starting to stream (not on the
+initial call), the client currently just sees a truncated response with no
+retry. Revisit this once the audit log (milestone 7) exists — mid-stream
+failures need to be recorded either way, so that's a natural point to also
+add a clear error-terminated SSE event instead of silent truncation.

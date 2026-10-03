@@ -12,6 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider/mock"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/router"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -39,9 +44,34 @@ func main() {
 		addr = ":8080"
 	}
 
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	redisClient := redis.NewClient(&redis.Options{Addr: redisAddr})
+	respCache := cache.New(redisClient, 10*time.Minute)
+
+	// Two mock providers wired as primary/secondary for one route. This is
+	// what milestone 2 needs to prove fallback/caching/streaming without a
+	// real provider key; see DECISIONS.md for when a real provider gets
+	// plugged in instead of (or alongside) these.
+	primary := mock.New("mock-primary")
+	secondary := mock.New("mock-secondary")
+	if os.Getenv("MOCK_PRIMARY_UNHEALTHY") == "true" {
+		primary.SetUnhealthy(true)
+	}
+
+	r := router.New()
+	r.RegisterProvider(primary)
+	r.RegisterProvider(secondary)
+	r.AddRoute(router.Route{ModelAlias: "mock-model", Providers: []string{"mock-primary", "mock-secondary"}})
+
+	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/readyz", handleReadyz)
+	mux.Handle("/v1/chat/completions", chatHandler)
 
 	srv := &http.Server{
 		Addr:         addr,

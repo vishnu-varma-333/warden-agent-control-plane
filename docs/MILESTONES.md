@@ -4,7 +4,7 @@ Each milestone ends with something running and tested. Don't start the next
 until the current one is done.
 
 - [x] **1. Foundations** — repository, CI pipeline, local Kubernetes, PostgreSQL, Redis, Kafka, OpenTelemetry wired up.
-- [ ] **2. Model gateway** — streaming passthrough to 2+ providers, API keys, fallback, circuit breakers, exact caching. First latency benchmark.
+- [x] **2. Model gateway** — streaming passthrough to 2+ providers, API keys, fallback, circuit breakers, exact caching. First latency benchmark.
 - [ ] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
 - [ ] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
 - [ ] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
@@ -24,3 +24,16 @@ until the current one is done.
 - [x] OpenTelemetry wired into gateway/control-api (`internal/telemetry`, `otelhttp` middleware) — verified real spans reach Jaeger from both services.
 
 **Milestone 1: done.**
+
+## Milestone 2 progress
+
+- [x] `/v1/chat/completions` endpoint, OpenAI-compatible request/response shape, both streaming (SSE) and non-streaming.
+- [x] Router with per-provider fallback order (`internal/router`), unit-tested.
+- [x] Circuit breaker per provider (`internal/breaker`), unit-tested (closed→open→half-open→closed transitions).
+- [x] Exact-match response cache in Redis (`internal/cache`), verified via a real cache-hit log line.
+- [x] Mock provider (`internal/provider/mock`) standing in for real backends, with on/off "unhealthy" switch to prove fallback deterministically.
+- [x] End-to-end manual verification: non-stream call, cache hit, SSE stream, and fallback-when-primary-down — all observed in running logs, not just code review.
+- [x] First latency benchmark: see `docs/BENCHMARKS.md` — p99 4.49ms vs. 15ms target.
+- [ ] Real provider integration (OpenAI/Anthropic/other) — deferred until an API key is supplied; see DECISIONS.md.
+
+**Milestone 2: core logic done; real-provider wiring open pending an API key.**
