@@ -47,3 +47,36 @@ first real code running.
 on Kubernetes" (service discovery, config, resource limits) that will need
 closing before the kill-test and rolling-deploy milestones. Tracked in
 `docs/MILESTONES.md` under milestone 1 as still open.
+
+**Update (same day):** closed the gap — `deploy/k8s-local/` holds plain
+Kustomize manifests (no Helm yet; that's milestone 10) for the same five
+services, applied to a real `kind` cluster and verified (all pods Ready,
+PVCs bound) before tearing the cluster down. Two things changed going from
+compose to Kubernetes: Redpanda's `--advertise-kafka-addr` has to be the
+in-cluster DNS name (`redpanda.warden-local.svc.cluster.local`), not
+`localhost`, since other pods resolve it through cluster DNS, not the docker
+network; and Postgres's data volume is mounted with a `subPath` so the PVC's
+root isn't handed to Postgres directly (it refuses to start if that
+directory isn't empty on first init). `kind` clusters are disposable by
+design — created, verified, deleted — same reasoning as the spec's "create
+EKS only during benchmark runs" cost note, just applied locally.
+
+## 2026-10-03 — OTel wiring: otelhttp middleware over manual spans
+
+**Options:** hand-write middleware that starts/ends a span per request vs.
+use `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`.
+
+**Chose:** `otelhttp.NewHandler` wrapping the mux in both services
+(`internal/telemetry` holds the shared TracerProvider setup; each binary's
+`main.go` just calls `telemetry.Init(ctx, serviceName)`).
+
+**Why:** this is the standard, maintained instrumentation path for Go's
+`net/http` — it handles span naming, status codes, and context propagation
+correctly, including edge cases (panics, hijacked connections) that a
+hand-rolled version would get wrong first try. Writing it by hand would only
+teach how *not* to do it.
+
+**Cost:** one more third-party dependency in the hot path. Verified it
+actually works end-to-end (not just "compiles"): ran the gateway against the
+live collector, hit `/healthz` twice, queried Jaeger's API directly, and
+confirmed two `gateway` spans arrived.

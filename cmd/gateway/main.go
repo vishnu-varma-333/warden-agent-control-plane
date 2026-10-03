@@ -11,11 +11,28 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	shutdownTelemetry, err := telemetry.Init(ctx, "gateway")
+	if err != nil {
+		slog.Error("telemetry init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdownTelemetry(context.Background()); err != nil {
+			slog.Error("telemetry shutdown failed", "error", err)
+		}
+	}()
 
 	addr := os.Getenv("GATEWAY_ADDR")
 	if addr == "" {
@@ -28,14 +45,11 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      otelhttp.NewHandler(mux, "gateway"),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		slog.Info("gateway listening", "addr", addr)

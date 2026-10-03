@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: warden-local
+data:
+  otel-collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http: { endpoint: 0.0.0.0:4318 }
+    processors:
+      batch: {}
+    exporters:
+      otlp:
+        endpoint: jaeger:4317
+        tls: { insecure: true }
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlp, debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: warden-local
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: jaeger }
+  template:
+    metadata:
+      labels: { app: jaeger }
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.60
+          env:
+            - { name: COLLECTOR_OTLP_ENABLED, value: "true" }
+          ports:
+            - containerPort: 16686
+            - containerPort: 4317
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: warden-local
+spec:
+  selector: { app: jaeger }
+  ports:
+    - { name: ui, port: 16686, targetPort: 16686 }
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: warden-local
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: otel-collector }
+  template:
+    metadata:
+      labels: { app: otel-collector }
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.111.0
+          args: ["--config=/etc/otel-collector.yaml"]
+          ports:
+            - containerPort: 4317
+            - containerPort: 4318
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel-collector.yaml
+              subPath: otel-collector.yaml
+      volumes:
+        - name: config
+          configMap: { name: otel-collector-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: warden-local
+spec:
+  selector: { app: otel-collector }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }

@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: warden-local
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          # No PVC: rate-limit counters and the policy-decision cache are
+          # derived/rebuildable state, per the data model — losing them on
+          # a pod restart is acceptable.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: warden-local
+spec:
+  selector: { app: redis }
+  ports:
+    - port: 6379
+      targetPort: 6379

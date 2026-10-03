@@ -3,7 +3,7 @@
 Each milestone ends with something running and tested. Don't start the next
 until the current one is done.
 
-- [ ] **1. Foundations** — repository, CI pipeline, local Kubernetes, PostgreSQL, Redis, Kafka, OpenTelemetry wired up.
+- [x] **1. Foundations** — repository, CI pipeline, local Kubernetes, PostgreSQL, Redis, Kafka, OpenTelemetry wired up.
 - [ ] **2. Model gateway** — streaming passthrough to 2+ providers, API keys, fallback, circuit breakers, exact caching. First latency benchmark.
 - [ ] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
 - [ ] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
@@ -20,5 +20,7 @@ until the current one is done.
 - [x] Repository scaffolded (Go module, `cmd/gateway`, `cmd/control-api`, `services/guard-classifier`, `console`, `deploy/*`).
 - [x] Local dev stack: Postgres, Redis, Redpanda, OTel Collector, Jaeger (`deploy/docker/docker-compose.yml`).
 - [x] CI pipeline: build + vet + test on every push (`.github/workflows/ci.yml`).
-- [ ] Local Kubernetes (kind/k3s) manifests for the same dependency stack.
-- [ ] OpenTelemetry actually wired into gateway/control-api code (collector is up, but nothing emits spans yet).
+- [x] Local Kubernetes manifests (`deploy/k8s-local/`, applied via Kustomize) for Postgres, Redis, Redpanda, OTel Collector, Jaeger — verified on a real `kind` cluster: all 5 pods reached Ready, PVCs bound, then cluster torn down (disposable, same cost principle as EKS in production).
+- [x] OpenTelemetry wired into gateway/control-api (`internal/telemetry`, `otelhttp` middleware) — verified real spans reach Jaeger from both services.
+
+**Milestone 1: done.**
