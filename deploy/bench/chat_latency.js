@@ -1,10 +1,23 @@
-// First latency benchmark (milestone 2): "added gateway latency" with the
-// provider mocked — the mock provider responds with zero artificial delay,
-// so everything k6 measures here IS the gateway's own overhead (JSON
-// decode, cache lookup, routing, breaker checks, response encode), not a
-// real provider's network time. Run: k6 run deploy/bench/chat_latency.js
+// Added gateway latency, re-run for milestone 10 now that identity
+// (milestone 3) and the policy engine (milestone 5) are both in this
+// request's path (the original milestone 2 version of this script
+// predates both and would now get 401s — it never carried a token or an
+// X-Acting-As header, since neither was enforced yet). The guard
+// classifier (milestone 8) is NOT in this path — it only scans MCP tool
+// descriptions/outputs, not /v1/chat/completions — so this still isolates
+// gateway + identity + policy overhead, not guard latency (that's
+// benchmarked separately against the classifier itself).
+//
+// The provider is still mocked with zero artificial delay, so this still
+// measures the gateway's own overhead, not a real provider's network
+// time. Run: TOKEN=$(deploy/bench/get_token.sh) k6 run -e TOKEN=$TOKEN deploy/bench/chat_latency.js
 import http from "k6/http";
 import { check } from "k6";
+
+const TOKEN = __ENV.TOKEN;
+if (!TOKEN) {
+  throw new Error("set -e TOKEN=$(deploy/bench/get_token.sh)");
+}
 
 export const options = {
   scenarios: {
@@ -33,7 +46,11 @@ export default function () {
   });
 
   const res = http.post("http://localhost:8080/v1/chat/completions", body, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${TOKEN}`,
+      "X-Acting-As": "user-1",
+    },
   });
 
   check(res, { "status is 200": (r) => r.status === 200 });

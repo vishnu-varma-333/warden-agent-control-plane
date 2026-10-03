@@ -1,0 +1,152 @@
+# Full stack in containers, on a bridge network addressed by service name
+# — unlike docker-compose.yml (infra only; every Warden binary runs on the
+# host during local dev, hence that file's localhost-based Redpanda
+# advertise address). This file is for the single-VM deploy milestone 10
+# describes: one `docker compose up` brings up everything, infra and app
+# alike. See deploy/terraform/ for the EC2 instance this runs on, and
+# DECISIONS.md for why a single VM instead of EKS (no AWS free tier for
+# the EKS control plane; the spec's own cost note says EKS is for
+# benchmark runs only, not the always-on demo).
+#
+# Build the app images first (from the repo root):
+#   docker build -f deploy/docker/Dockerfile.gateway -t warden-gateway .
+#   docker build -f deploy/docker/Dockerfile.control-api -t warden-control-api .
+#   docker build -f deploy/docker/Dockerfile.demo-mcp-server -t warden-demo-mcp-server .
+#   docker build -t warden-console ./console
+#   docker build -t warden-guard-classifier ./services/guard-classifier
+# (guard-classifier needs services/guard-classifier/model/ present in the
+# build context first — it's gitignored, ~512MB; see that Dockerfile.)
+#
+# Then: docker compose -f deploy/docker/docker-compose.prod.yml up -d
+name: warden-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: warden
+      POSTGRES_PASSWORD: warden
+      POSTGRES_DB: warden
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warden"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      # The service DNS name, not localhost — containers reach this one
+      # by "redpanda" on the compose network, unlike docker-compose.yml's
+      # host-binary setup. See this file's header comment.
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Pins the issuer every token carries to this one value regardless of
+      # which hostname/port a client used to reach Keycloak (the host's
+      # localhost:8180, or another container's "keycloak:8080") — without
+      # this, the gateway's own KEYCLOAK_ISSUER check and the issuer a
+      # token actually carries can disagree depending on how the token was
+      # fetched, and every token gets rejected with "invalid issuer".
+      # Found live getting this compose file running end to end. For a
+      # real EC2/public deploy, set this to that host's real DNS name
+      # instead — see deploy/terraform's README note.
+      # Keycloak 25 defaults to the "hostname:v2" provider, which (unlike
+      # v1) ignores KC_HOSTNAME_PORT entirely — the full base URL, scheme
+      # and port included, must go in KC_HOSTNAME itself.
+      KC_HOSTNAME: http://keycloak:8080
+    volumes:
+      - ./keycloak-realm.json:/opt/keycloak/data/import/realm.json:ro
+    ports:
+      - "8180:8080" # admin console / token endpoint, exposed for demo login
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  guard-classifier:
+    image: warden-guard-classifier
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  demo-mcp-server:
+    image: warden-demo-mcp-server
+
+  gateway:
+    image: warden-gateway
+    environment:
+      REDIS_ADDR: redis:6379
+      DATABASE_URL: postgres://warden:warden@postgres:5432/warden?sslmode=disable
+      REDPANDA_BROKERS: redpanda:9092
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/warden
+      GUARD_CLASSIFIER_ADDR: guard-classifier:50051
+      DEMO_MCP_URL: http://demo-mcp-server:9090
+      WARDEN_AUDIT_SIGNING_KEY: ${WARDEN_AUDIT_SIGNING_KEY:?set in .env — see deploy/docker/generate_env_secrets.sh}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+      keycloak: { condition: service_healthy }
+      guard-classifier: { condition: service_healthy }
+
+  control-api:
+    image: warden-control-api
+    environment:
+      REDIS_ADDR: redis:6379
+      DATABASE_URL: postgres://warden:warden@postgres:5432/warden?sslmode=disable
+      REDPANDA_BROKERS: redpanda:9092
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env before deploying}
+      WARDEN_AUDIT_PUBLIC_KEY: ${WARDEN_AUDIT_PUBLIC_KEY:?set in .env — see deploy/docker/generate_env_secrets.sh}
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+
+  console:
+    image: warden-console
+    environment:
+      CONTROL_API_URL: http://control-api:8081
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env before deploying}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - control-api
+
+volumes:
+  postgres-data:

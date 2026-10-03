@@ -662,3 +662,92 @@ and the placeholder showing through.
 behavior doesn't touch. Verified live: submitting invalid Cedar now shows
 the real parser error (`internal/policy.CreateVersion`'s validation)
 *and* leaves the admin's exact input in place to edit and resubmit.
+
+## 2026-10-03 — EC2, not EKS, for the AWS deploy
+
+**Context:** the spec names "EKS or EC2" as acceptable choices for the
+deploy target, and its own cost note already points at a single VM for
+the always-on demo, reserving EKS for benchmark runs only (spin up,
+benchmark, destroy). Milestone 10 needed to actually pick one.
+
+**Why EC2:** the EKS control plane has no AWS free tier and costs
+~$0.10/hour (~$73/month) to exist at all, whether or not anything is
+running on it — a fixed cost a single-instance demo shouldn't carry just
+to prove Kubernetes competency it doesn't otherwise need. EC2 (plus
+`docker compose`, not a new orchestrator) runs the identical containers
+a real cluster would, at a cost that can be genuinely free (AWS free
+tier, new account) or a few dollars a month otherwise. The local
+Kubernetes work (`deploy/k8s-local/`, proven on a real `kind` cluster in
+milestone 1) already demonstrates the Kubernetes-specific skills
+(manifests, Kustomize, a real applied cluster) — EKS specifically would
+mostly re-prove "can configure a managed control plane," at real ongoing
+cost, without adding a new skill this project doesn't already show
+elsewhere. See `deploy/terraform/main.tf` and its README for the full
+cost breakdown and the honest instance-sizing note (free-tier `t3.micro`
+is genuinely tight for this whole stack on 1GB RAM).
+
+## 2026-10-03 — no Dockerfiles existed before this milestone (a real gap, closed)
+
+Through milestone 9, `deploy/docker/docker-compose.yml` only ever
+containerized the **infrastructure** (Postgres, Redis, Redpanda, OTel,
+Jaeger, Keycloak) — every Warden-built service (gateway, control-api,
+guard-classifier, console) ran as a native process on the host the whole
+time. That's a real gap against the spec's own "Packaging: Docker, Helm
+chart — one-command local run; Kubernetes deploy" line, not a
+hypothetical one: there was no way to actually run the full stack in
+containers, which the AWS single-VM deploy specifically needs. Fixed by
+writing a Dockerfile per service (multi-stage Go builds into
+`distroless/static`; a Next.js `output: "standalone"` build for the
+console; Python slim for the guard classifier) and a second compose file,
+`docker-compose.prod.yml`, wiring all of them together on a real bridge
+network with service-name addressing (different from the dev compose
+file, which is host-binary-addressed on purpose — see that file's own
+header comment on why the two can't share one Redpanda advertise-address
+config). Verified live: all 8 containers healthy, a real authenticated
+model call and a real MCP `initialize` handshake both succeeded through
+the fully containerized stack, not just "the images build."
+
+**Known limitation, stated rather than hidden:** the guard classifier's
+trained model (`services/guard-classifier/model/`, ~512MB) is gitignored
+and isn't fetched by `git clone`, so its Dockerfile only works when
+`model/` already exists in the build context — building it on a fresh
+clone (e.g. straight CI) needs the model supplied separately (a mounted
+volume, or fetched from object storage at build/start time). Tracked as
+a follow-up, not solved by this milestone.
+
+## 2026-10-03 — found via live testing: Keycloak's issuer didn't match across container boundaries
+
+**What happened:** the moment `docker-compose.prod.yml` was actually
+run end to end (not just "the images build"), every real request failed
+with `"invalid issuer"` even though the gateway's `KEYCLOAK_ISSUER` and
+the token's own `iss` claim looked like they should agree.
+
+**Root cause:** Keycloak, by default, sets a token's `iss` claim from
+whatever hostname/port the *client* used to reach it — `localhost:8180`
+from outside the compose network, `keycloak:8080` from another
+container — rather than one fixed value. The gateway, naturally, expects
+one fixed value (`KEYCLOAK_ISSUER=http://keycloak:8080/...`, the service
+name other containers reach it by). Two different, both "correct from
+where they're standing," answers to "what is Keycloak's URL."
+
+**Fix:** pin it with `KC_HOSTNAME`, but with a catch — Keycloak 25
+defaults to its newer "hostname:v2" hostname provider, under which
+`KC_HOSTNAME_PORT` (which looked like the obvious fix) is silently a
+no-op; it's a v1-only option (confirmed directly from the container's
+own startup log). Under v2, the full base URL — scheme and port
+included — has to go in `KC_HOSTNAME` itself:
+`KC_HOSTNAME=http://keycloak:8080`. After that, every token's issuer is
+pinned to that one value regardless of how it was actually reached,
+including from outside the compose network, which is what a real
+external client hitting the public EC2 IP also needs. Verified live: a
+token fetched via the host-mapped port, presented to the gateway inside
+the container network, was accepted.
+
+**Why worth recording in this much detail:** this is exactly the kind of
+bug that only exists at the integration boundary between two
+independently-reasonable pieces of config — unit tests for either side
+alone would never catch it, because each side's own config is internally
+consistent. Found only because the full containerized stack was actually
+run end to end, which is the entire reason that verification step
+existed in this milestone rather than stopping at "docker build
+succeeded."

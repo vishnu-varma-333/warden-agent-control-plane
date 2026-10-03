@@ -1,0 +1,14 @@
+# Multi-stage: build the static Go binary, ship it in a minimal distroless
+# runtime image — no shell, no package manager, smallest attack surface
+# for a hot-path internet-facing service.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/gateway ./cmd/gateway
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /out/gateway /gateway
+EXPOSE 8080
+ENTRYPOINT ["/gateway"]

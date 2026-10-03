@@ -1,0 +1,5 @@
+.git
+console/node_modules
+console/.next
+services/guard-classifier/.venv
+services/guard-classifier/train-output

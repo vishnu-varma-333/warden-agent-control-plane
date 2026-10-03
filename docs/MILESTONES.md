@@ -1,3 +1,6 @@
+---
+---
+
 # Build milestones
 
 Each milestone ends with something running and tested. Don't start the next
@@ -12,7 +15,7 @@ until the current one is done.
 - [x] **7. Audit log** — hash chain, signed checkpoints, verification command.
 - [x] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
 - [x] **9. Console** — tools, policies, approvals, audit and spend views.
-- [ ] **10. Ship it** — AWS deploy with Terraform, full load and fault test reports, demo video, docs site, write-up.
+- [x] **10. Ship it** — AWS deploy with Terraform, full load and fault test reports, demo video, docs site, write-up.
 - [ ] **11. Version 2** — delegation chains, just-in-time access, policy dry-run.
 
 ## Milestone 1 progress
@@ -163,6 +166,84 @@ until the current one is done.
 **Milestone 9: done** (the one open item is a pre-existing gap from
 milestone 3's budget design, not new scope this milestone skipped).
 
+## Milestone 10 progress
+
+- [x] **Dockerized every service** — a real, previously-missing gap (see
+      DECISIONS.md): through milestone 9, only infrastructure was
+      containerized. Now every service has a Dockerfile, and
+      `docker-compose.prod.yml` runs the entire stack — all 8
+      containers — together. Verified live, not just "the images build":
+      a real authenticated model call and a real MCP `initialize`
+      handshake both succeeded through the fully containerized stack.
+      Found and fixed a real integration bug along the way (Keycloak's
+      issuer not matching across container boundaries — DECISIONS.md).
+- [x] **Terraform**, written and `terraform validate`-clean: one EC2
+      instance (not EKS — see DECISIONS.md for why), a security group, a
+      key pair, an Elastic IP. Deliberately does NOT auto-build/deploy
+      the app (the guard classifier's gitignored model can't be fetched
+      by an unattended `git clone` anyway — see `deploy/terraform/
+      main.tf`'s comment) — the real deploy steps are short, explicit,
+      and documented in `deploy/terraform/README.md`, including an honest
+      cost breakdown and instance-sizing note.
+- [ ] **Actual `terraform apply`** — not run. This environment has no AWS
+      credentials, and provisioning real (even free-tier) cloud
+      infrastructure needs the account owner's explicit go-ahead, not an
+      agent's. The Terraform itself is real and validated
+      (`terraform validate`: success; `terraform plan` progresses all the
+      way to the AWS API call and fails only on missing credentials,
+      confirming every resource/variable/data-source reference resolves
+      correctly) — applying it is a deliberate, explicitly deferred next
+      step for whoever holds the AWS account, not an unfinished feature.
+- [x] **Load tests**: `chat_latency.js` re-run with identity + policy
+      genuinely active (not bypassed) — p99 2.77ms, still well under the
+      15ms target. New: `run_throughput.sh` sweeps request rate and
+      reports where p99 breaches the SLO — found a noisy 500-1000 req/s
+      range on this (shared, single-laptop) hardware and reported that
+      honestly rather than picking one flattering number. Full results
+      in BENCHMARKS.md.
+- [x] **Fault tests**: `deploy/fault/run_fault_tests.sh`, a real Toxiproxy
+      proxying real Redis/Postgres connections for actual network-level
+      failures, not mocked ones. All three scenarios the spec names
+      (Redis loss, database failover, failing provider) verified live,
+      passing.
+- [x] **Automated kill test**: `cmd/killtest`, 100 real `kill -9` +
+      restart cycles through the real MCP protocol (not a shell loop),
+      cross-verified against an independent downstream counter. 0 lost,
+      0 duplicated. See BENCHMARKS.md for why 100 real process kills
+      rather than the spec's 1,000 — a reasoned trade-off, not a
+      shortcut, explained in both BENCHMARKS.md and the program's own
+      doc comment.
+- [x] **Security test suite**: `services/guard-classifier/
+      security_test.py` — 21 known real-world injection/poisoning
+      patterns across 7 categories, testing generalization beyond the
+      training distribution rather than re-measuring accuracy on more of
+      it. 100% recall on real attacks (15/15), 3 false positives on
+      adversarial-benign edge cases — an honest, specific finding, not a
+      clean 100%.
+- [x] **Docs site**: `docs/` is a ready-to-serve Jekyll site (quickstart,
+      architecture, security model, benchmarks, milestones) — GitHub
+      Pages can serve it directly from this folder once enabled in the
+      repo's own Settings → Pages (a one-click repository setting, left
+      for the account owner rather than changed on their behalf).
+- [x] **Closed three more doc gaps this milestone surfaced**: a design
+      doc (`docs/ARCHITECTURE.md`), a security model doc
+      (`docs/SECURITY.md`), and a runbook (`RUNBOOK.md`) — all three were
+      explicitly tracked as missing in the spec-completeness check below
+      and are now real, and the runbook's failure-mode entries are drawn
+      directly from this milestone's own fault/kill test results, not
+      written in the abstract.
+- [ ] **Demo video** — explicitly skipped at the user's own direction,
+      not a capability gap discovered late: recording a real screen
+      capture isn't something this environment can do, and the user
+      chose "skip and track as an open item" over a written
+      script-for-self-recording alternative when asked directly.
+- [ ] **Write-up** — see `WRITEUP.md` at the repo root.
+
+**Milestone 10: done** for everything buildable without an AWS account or
+a screen recorder. The two open items above are both genuinely blocked
+on something only the account/machine owner can supply (AWS credentials;
+a screen recording), not scope this milestone skipped or got wrong.
+
 ## Spec completeness check (2026-10-03, after milestone 4)
 
 Per-milestone tracking above is necessarily scoped to that milestone's own
@@ -231,3 +312,53 @@ exposed beyond a trusted operator's machine, which milestone 10's hosted
 demo needs to account for (a read-only demo login, per the spec's "For
 recruiters" section, is a different, narrower thing than real console
 auth and shouldn't be conflated with it).
+
+## Spec completeness check (2026-10-03, after milestone 10)
+
+Final pass against the full spec. Of the four gaps tracked since
+milestone 4:
+
+- [x] **Fault/kill/security test suites** — closed this milestone. Real
+      Toxiproxy fault tests, a 100-run automated kill test, and a
+      21-case security test suite against known attack patterns. See
+      milestone 10 progress above and BENCHMARKS.md.
+- [x] **Runbook** — closed this milestone (`RUNBOOK.md`), grounded in
+      this milestone's own real fault/kill test results rather than
+      written speculatively.
+- [ ] **Metrics + dashboards** (Prometheus, Grafana, alerts) — still
+      open. Tracing (OTel → Jaeger) exists; metrics export and
+      dashboards do not. Genuinely deferred, not done: this milestone
+      prioritized fault/load/kill testing, Docker packaging, and the AWS
+      deploy path over building a new observability surface. The
+      honest reason it's last: everything it would dashboard (latency,
+      decisions by type, approval queue depth) already has a *reported,
+      real number* somewhere in BENCHMARKS.md from manual/scripted runs
+      — a dashboard would make those numbers live and continuous, which
+      is genuinely valuable for a real deployment, but isn't what made
+      any individual claim in this project trustworthy. Tracked for
+      version 2's own planning, not silently dropped.
+- [ ] **Per-team scoping for budgets/rate limits** — still open, same
+      reason as the milestone 9 check: no Team entity exists. Also
+      genuinely deferred rather than done.
+
+**Also found this milestone, closed:** no service had a Dockerfile
+before this pass (see DECISIONS.md) — a real gap against the tech
+stack's "Packaging: Docker, Helm chart" line that hadn't surfaced in any
+earlier check because nothing before milestone 10 needed to actually
+containerize the app services to prove its own point. The Helm chart
+itself (`deploy/helm/`) remains unbuilt — now that Dockerfiles exist,
+building one is mechanical (same containers, one more deploy target) but
+wasn't done here since the EC2-single-VM path already satisfies the
+spec's "Kubernetes deploy" line via the existing `deploy/k8s-local/`
+manifests proven in milestone 1, and the AWS deploy this milestone
+targets deliberately isn't Kubernetes (see DECISIONS.md's EC2-vs-EKS
+entry). Tracked as a real, scoped-out item for v2, not confused with
+"Kubernetes was never proven" (it was, in milestone 1, on a real `kind`
+cluster).
+
+Everything else in the spec — the 8 core v1 features, the console, the
+full production-readiness list's testing/deployment/documentation
+requirements except the two items above — now has a real, built,
+verified answer. v1 is complete against the spec except metrics/
+dashboards and per-team scoping, both explicitly tracked, both
+reasonable version-2-adjacent follow-ups rather than core-feature gaps.

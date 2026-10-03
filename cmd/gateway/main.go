@@ -106,7 +106,13 @@ func main() {
 		}
 	}
 	limiter := ratelimit.New(redisClient, requestsPerMinute, time.Minute)
-	budgetEnforcer := budget.New(redisClient, 100, time.Hour)
+	budgetPerHour := 100.0
+	if v := os.Getenv("BUDGET_LIMIT_PER_HOUR"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			budgetPerHour = n
+		}
+	}
+	budgetEnforcer := budget.New(redisClient, budgetPerHour, time.Hour)
 
 	pgDSN := os.Getenv("DATABASE_URL")
 	if pgDSN == "" {
