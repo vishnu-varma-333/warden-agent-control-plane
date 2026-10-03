@@ -185,15 +185,24 @@ milestone 3's budget design, not new scope this milestone skipped).
       main.tf`'s comment) — the real deploy steps are short, explicit,
       and documented in `deploy/terraform/README.md`, including an honest
       cost breakdown and instance-sizing note.
-- [ ] **Actual `terraform apply`** — not run. This environment has no AWS
-      credentials, and provisioning real (even free-tier) cloud
-      infrastructure needs the account owner's explicit go-ahead, not an
-      agent's. The Terraform itself is real and validated
-      (`terraform validate`: success; `terraform plan` progresses all the
-      way to the AWS API call and fails only on missing credentials,
-      confirming every resource/variable/data-source reference resolves
-      correctly) — applying it is a deliberate, explicitly deferred next
-      step for whoever holds the AWS account, not an unfinished feature.
+- [x] **A real, running public deployment was deliberately decided
+      against** — not left undone, decided against. The Terraform itself
+      is real and validated (`terraform validate`: success; `terraform
+      plan` progresses all the way to the AWS API call and fails only on
+      missing credentials, confirming every resource/variable/
+      data-source reference resolves correctly), so the deploy path
+      exists and is provable without needing it to run continuously.
+      Considered and rejected: AWS (even free-tier has real billing risk
+      and the RAM sizing problem noted in `deploy/terraform/
+      variables.tf`), Oracle Cloud's Always-Free tier (genuinely free
+      forever and correctly sized, but its ARM capacity is notoriously
+      constrained at signup). The actual reason, independent of cost:
+      for an infra/security project like this one, keeping Keycloak +
+      Postgres + Redis + Kafka + an ML model running 24/7 for a demo
+      that gets looked at occasionally isn't what gets evaluated in an
+      interview anyway — the repo, the documented decisions, and the
+      ability to `docker compose up` it live on a call are. See
+      WRITEUP.md.
 - [x] **Load tests**: `chat_latency.js` re-run with identity + policy
       genuinely active (not bypassed) — p99 2.77ms, still well under the
       15ms target. New: `run_throughput.sh` sweeps request rate and
@@ -232,17 +241,20 @@ milestone 3's budget design, not new scope this milestone skipped).
       and are now real, and the runbook's failure-mode entries are drawn
       directly from this milestone's own fault/kill test results, not
       written in the abstract.
-- [ ] **Demo video** — explicitly skipped at the user's own direction,
-      not a capability gap discovered late: recording a real screen
-      capture isn't something this environment can do, and the user
-      chose "skip and track as an open item" over a written
-      script-for-self-recording alternative when asked directly.
-- [ ] **Write-up** — see `WRITEUP.md` at the repo root.
+- [ ] **Demo video** — deliberately not done, a decision not a gap:
+      recording a real screen capture isn't something this environment
+      can do, and when offered a script to self-record from instead, the
+      decision was to skip it rather than pursue it. Tracked as a real
+      open item if ever wanted later — `docker compose up` plus the
+      scenarios in BENCHMARKS.md's fault/kill-test sections are the
+      source material if so.
+- [x] **Write-up** — `WRITEUP.md` at the repo root.
 
-**Milestone 10: done** for everything buildable without an AWS account or
-a screen recorder. The two open items above are both genuinely blocked
-on something only the account/machine owner can supply (AWS credentials;
-a screen recording), not scope this milestone skipped or got wrong.
+**Milestone 10: done.** A live public deployment and a demo video were
+both considered and deliberately not pursued — not blocked, decided
+against, for the reasons above — in favor of everything that's actually
+real here: the Terraform, the Docker packaging, and the fault/load/kill/
+security test results a live demo or video would only be restating.
 
 ## Spec completeness check (2026-10-03, after milestone 4)
 

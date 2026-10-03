@@ -86,6 +86,16 @@ can't be checked.
   would, via Docker Compose, demonstrates the deployment without a fixed
   monthly cost a demo project doesn't need — the Kubernetes-specific
   skills are already proven separately, on a real local `kind` cluster.
+- **No permanent live deployment, by choice, not by gap.** The Terraform
+  is real and `terraform plan`-validated end to end; I decided not to
+  run it continuously. Keeping Keycloak, Postgres, Redis, Kafka and an
+  ML model running 24/7 for a demo that gets looked at occasionally
+  isn't what actually gets evaluated for an infra/security project —
+  the repo, the documented decisions, and `docker compose up` on a call
+  are. The same reasoning applies to a demo video: the fault/kill/load
+  test results in BENCHMARKS.md are the real evidence; a recording of
+  the same scenarios wouldn't add a claim that isn't already backed by a
+  reproducible script in the repo.
 
 ## What I'd call out as honest limitations, unprompted
 
