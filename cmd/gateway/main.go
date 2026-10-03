@@ -21,6 +21,7 @@ import (
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/guard"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
@@ -172,7 +173,19 @@ func main() {
 	approvalManager.StartExpirySweep(ctx, 10*time.Second)
 
 	toolRegistry := registry.New(pgConn)
-	mcpGW := mcpgateway.New(toolRegistry, policyEngine, approvalManager, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
+	guardAddr := envOr("GUARD_CLASSIFIER_ADDR", "localhost:50051")
+	// 50ms, not a round-number guess: measured classifier latency is
+	// ~5-9ms (see DECISIONS.md and services/guard-classifier/BENCHMARKS),
+	// so this leaves real headroom for a slow call while still being a
+	// "strict" budget relative to typical request latency.
+	guardClient, err := guard.New(guardAddr, 50*time.Millisecond)
+	if err != nil {
+		slog.Error("guard client init failed", "error", err)
+		os.Exit(1)
+	}
+	defer guardClient.Close()
+
+	mcpGW := mcpgateway.New(toolRegistry, policyEngine, approvalManager, guardClient, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
 
 	demoMCPAddr := os.Getenv("DEMO_MCP_URL")
 	if demoMCPAddr == "" {

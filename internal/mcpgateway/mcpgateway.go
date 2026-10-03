@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/guard"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
@@ -32,6 +34,7 @@ type Gateway struct {
 	registry *registry.Registry
 	policy   *policy.Engine
 	approval *approval.Manager // nil means no approval gating is configured
+	guard    *guard.Client     // nil means no injection scanning is configured
 	verifier *identity.Verifier
 	outward  *mcp.Server
 	impl     *mcp.Implementation
@@ -41,11 +44,12 @@ type Gateway struct {
 	configs  map[string]UpstreamConfig
 }
 
-func New(reg *registry.Registry, pol *policy.Engine, appr *approval.Manager, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
+func New(reg *registry.Registry, pol *policy.Engine, appr *approval.Manager, grd *guard.Client, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
 	return &Gateway{
 		registry: reg,
 		policy:   pol,
 		approval: appr,
+		guard:    grd,
 		verifier: verifier,
 		outward:  mcp.NewServer(impl, nil),
 		impl:     impl,
@@ -161,6 +165,10 @@ func (g *Gateway) Sync(ctx context.Context, upstreamName string) error {
 
 		switch status {
 		case registry.StatusActive:
+			if g.descriptionLooksLikeInjection(ctx, upstreamName, t) {
+				g.outward.RemoveTools(t.Name)
+				continue
+			}
 			g.outward.AddTool(&mcp.Tool{
 				Name:        t.Name,
 				Description: t.Description,
@@ -253,7 +261,20 @@ func (g *Gateway) proxyHandler(upstreamName string) mcp.ToolHandler {
 				result, err = session.CallTool(ctx, &mcp.CallToolParams{Name: toolName, Arguments: args})
 			}
 		}
-		return result, err
+		if err != nil {
+			return result, err
+		}
+
+		// Scan the OUTPUT, not just the tool's static description: this is
+		// the actual injection vector into the agent's context — a tool
+		// can return perfectly benign-looking content on first inspection
+		// and inject something malicious into a specific response.
+		if g.guard != nil {
+			if blocked := g.blockIfInjection(ctx, upstreamName, toolName, "output", resultText(result)); blocked != nil {
+				return blocked, nil
+			}
+		}
+		return result, nil
 	}
 }
 
@@ -305,6 +326,60 @@ func (g *Gateway) waitForApprovalThenProceed(ctx context.Context, header http.He
 	default:
 		return nil, fmt.Errorf("mcpgateway: approval %s in unexpected state %q", a.ID, state)
 	}
+}
+
+// descriptionLooksLikeInjection scans a tool's description before it's ever
+// exposed to an agent. Separate from the registry's hash-pinning (milestone
+// 4): pinning only catches a description CHANGING after Warden first saw
+// it — this catches one that's malicious from the very first sync, which a
+// hash can never flag since there's nothing to compare it against yet.
+func (g *Gateway) descriptionLooksLikeInjection(ctx context.Context, upstreamName string, t *mcp.Tool) bool {
+	if g.guard == nil {
+		return false
+	}
+	blocked := g.blockIfInjection(ctx, upstreamName, t.Name, "description", t.Description)
+	return blocked != nil
+}
+
+// blockIfInjection scans text and, if the classifier flags it, logs and
+// returns a non-nil placeholder result signaling "block this." A nil
+// return means either it's clean, or the classifier was unavailable — see
+// guard.Client.Scan's fail-open doc comment for why those are the same
+// outcome here, not treated as an error.
+func (g *Gateway) blockIfInjection(ctx context.Context, upstreamName, toolName, surface, text string) *mcp.CallToolResult {
+	if text == "" {
+		return nil
+	}
+	result, ok := g.guard.Scan(ctx, text)
+	if !ok || !result.IsInjection {
+		return nil
+	}
+	slog.Warn("guard: blocked suspected prompt injection",
+		"upstream", upstreamName, "tool", toolName, "surface", surface,
+		"confidence", result.Confidence, "latencyMs", result.LatencyMS)
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{&mcp.TextContent{
+			Text: fmt.Sprintf("blocked by Warden's injection guard (surface=%s, confidence=%.2f)", surface, result.Confidence),
+		}},
+	}
+}
+
+// resultText flattens a CallToolResult's content into one string for
+// scanning — the classifier takes raw text, not MCP's structured content
+// blocks.
+func resultText(r *mcp.CallToolResult) string {
+	if r == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range r.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 // hashTool fingerprints the parts of a tool definition that matter for

@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package guard;
+
+option go_package = "github.com/vishnu-varma-333/warden-agent-control-plane/internal/guard/guardpb";
+
+// Guard scans text for prompt-injection attempts. One RPC, one job: this is
+// deliberately not a general ML service — a single, strictly-latency-budgeted
+// call the gateway makes on tool descriptions and tool outputs.
+service Guard {
+  rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+}
+
+message ClassifyRequest {
+  string text = 1;
+}
+
+message ClassifyResponse {
+  bool is_injection = 1;
+  float confidence = 2;   // model's probability for the predicted class
+  double latency_ms = 3;  // inference time, server-measured, for the latency-budget benchmark
+}

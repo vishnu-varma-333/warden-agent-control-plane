@@ -499,3 +499,96 @@ policy requirement in mind, which is the actual argument for doing a
 design pass instead of only testing the happy path: some classes of bug
 only show up when you ask "what's the right order for these checks," not
 "does this specific test pass."
+
+## 2026-10-03 — Guard classifier fails open, deliberately, same as rate limit/budget
+
+**Decision:** `guard.Client.Scan` returns `ok=false` on any failure
+(timeout, connection error, classifier down) and `mcpgateway` treats that
+as "nothing to block" — the call proceeds, logged loudly but not denied.
+
+**Why:** this is a defense-in-depth layer sitting alongside the policy
+engine, which is the actual authorization boundary and already fails
+*closed* (milestone 3/5). Refusing all tool calls because an ML sidecar
+is unreachable would trade a detection gap (bad, but the policy engine is
+still enforcing independently) for a total availability outage (worse).
+The contrast with the policy engine's fail-closed design is the point —
+see milestone 3's original fail-open/fail-closed entries for where that
+line gets drawn and why.
+
+## 2026-10-03 — Found via benchmarking: ONNX export latency was ~25x higher than it needed to be
+
+**What happened:** the first served model measured ~123ms per
+classification — against a "strict latency budget," this would have
+meant either abandoning the hot-path requirement or quietly inflating the
+timeout to hide a real performance problem.
+
+**Root cause, found by isolating tokenization from inference:**
+`export_onnx.py`'s `dynamic_axes` only marked the batch dimension as
+dynamic, not sequence length — so the exported graph was hardcoded to
+always compute the full 128-token path, regardless of how short the
+actual input was. Combined with `intra_op_num_threads=1` and default
+graph optimization, every single call paid for processing a full 128-token
+sequence on one thread.
+
+**Fix:** marked sequence length dynamic too (`{0: "batch", 1: "sequence"}`
+on all three tensors), let each input use its own real length instead of
+padding to `max_length`, set `intra_op_num_threads=4` and
+`ORT_ENABLE_ALL` graph optimization. Measured result: ~123ms → ~4-9ms per
+call, a ~25x difference from three compounding fixes, not one.
+
+**Why worth recording with this much detail:** this is a good concrete
+answer to "how do you make an ML model fast enough for a hot path" beyond
+"export to ONNX" — the export itself can still be badly configured in a
+way that defeats most of the benefit, and the fix came from profiling
+(isolating tokenizer time from inference time, then testing one variable
+at a time), not from guessing.
+
+## 2026-10-03 — Found via live testing, twice: the classifier didn't generalize to its actual deployment domain
+
+**What happened (round 1):** the moment the trained classifier was wired
+into `mcpgateway.Sync` and the gateway restarted, it flagged **both**
+demo tools' descriptions as injection attempts — including "Echoes back
+whatever text you send it," which is about as benign as text gets.
+
+**Root cause:** `deepset/prompt-injections` (the public training dataset)
+is mostly conversational chat-style text. Its injection examples are
+almost all imperative ("ignore your instructions and...") and its benign
+examples are mostly declarative/conversational. The model learned
+"imperative sentence" as a cheap, mostly-correct-on-this-dataset proxy for
+"injection" — which fails completely on tool descriptions, since those
+are imperative by genre ("Permanently deletes a dataset") regardless of
+intent.
+
+**Fix, round 1:** added hand-written examples in the tool-description
+domain for **both classes** (`augment_data.py`'s `BENIGN_TOOL_TEXTS` /
+`INJECTION_TOOL_TEXTS`), not just benign ones. Adding only benign examples
+would have taught a different, equally wrong proxy ("tool-description-
+shaped text = benign"), which would make the classifier blind to real
+tool-poisoning attempts — and those are routinely phrased as exactly this
+kind of short imperative instruction, hidden inside otherwise plausible
+tool text. Verified the fix didn't just memorize the specific examples by
+testing paraphrased variants, not the literal training strings.
+
+**What happened (round 2):** fixing round 1 and testing the actual
+output-scanning path (not just the description path) live surfaced a
+*second* gap: `echo: hello through the proxy` — the literal shape of a
+real tool output — was still flagged. Neither deepset's prompts nor the
+round-1 additions look like that; both are full, grammatically complete
+sentences, while tool outputs are routinely short fragments ("OK",
+"42", "echo: hello world", a JSON blob).
+
+**Fix, round 2:** added `SHORT_BENIGN_OUTPUTS` / `SHORT_INJECTION_OUTPUTS`
+— short, fragment-like examples of both classes, matching what a tool
+output actually looks like. Re-verified the exact live call that failed
+before now succeeds, and that a real injection embedded in a tool-call
+argument is still correctly blocked.
+
+**Why this two-round story is worth keeping in full, not just the final
+fix:** this is train/serve skew, a real and common ML failure mode, caught
+only because the classifier was exercised against its actual deployment
+inputs (tool descriptions, tool outputs) rather than just evaluated on a
+held-out split of its own training distribution — which would have shown
+great numbers right up until the first real tool it looked at. "The
+held-out metrics look good" and "this works on the data it'll actually
+see in production" are different claims, and conflating them is a classic
+way ML systems look fine in testing and fail immediately in deployment.

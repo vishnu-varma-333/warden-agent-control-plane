@@ -98,3 +98,54 @@ verification take" number needs either a synthetic load generator seeding
 millions of rows, or real accumulated production traffic — both belong in
 the milestone 10 benchmark pass, tracked explicitly rather than
 extrapolated from 5 records here.
+
+## Guard classifier: accuracy and latency (milestone 8)
+
+**Spec target:** "Precision, recall and false-positive rate on a held-out
+set — report vs. an LLM-as-judge baseline on accuracy, latency and cost."
+
+**Setup:** DistilBERT fine-tuned for binary classification (benign /
+injection), exported to ONNX, served over gRPC
+(`services/guard-classifier`). Training data: the public
+`deepset/prompt-injections` dataset (546 train / 116 test) plus 54
+hand-written examples in the tool-description/tool-output domain
+(`augment_data.py`) — added across two rounds, each because the first
+version of the classifier failed on real text once actually wired into
+the gateway; see DECISIONS.md for the full story, since the iteration
+itself is as relevant as the final numbers. Benchmark measures the
+**served ONNX model over real gRPC calls** (`benchmark.py`), not the
+in-process PyTorch model — what's actually deployed, export step
+included.
+
+**Result (2026-10-03), 141-example held-out set (both domains combined):**
+
+| Metric | Value |
+|---|---|
+| Accuracy | 93.6% |
+| Precision | 100.0% |
+| Recall | 86.8% |
+| False-positive rate | 0.0% |
+| Latency p50 | 7.6 ms |
+| Latency p99 | 36.1 ms |
+| Latency max | 44.9 ms |
+
+**Target (strict latency budget):** under 50ms for the gateway's
+classifier call timeout (`internal/guard`). **Met**, with real headroom —
+p99 well under half the budget.
+
+**LLM-as-judge comparison:** not run. `llm_judge_benchmark.py` is fully
+built and ready — same held-out set, same metrics, plus cost — but needs a
+real model provider behind Warden's gateway (still mock-only; see
+milestone 2's DECISIONS.md) to produce an actual judgment. Running it
+against the mock provider, which only echoes its input, would produce
+numbers that look like a real comparison but measure nothing. Tracked as
+an explicit follow-up once a provider key is configured, not faked or
+silently dropped.
+
+**Caveat worth saying out loud in an interview:** 141 examples is a small
+held-out set, and 54 of the "domain" examples were hand-written by
+necessity (no large public dataset of labeled tool descriptions/outputs
+exists). These are real, measured numbers, not estimates — but "real on a
+small set" is a narrower claim than "production-grade on a representative
+distribution," and that's a fair question to expect and have a direct
+answer for, not deflect.

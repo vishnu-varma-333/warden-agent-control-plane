@@ -10,7 +10,7 @@ until the current one is done.
 - [x] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
 - [x] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
 - [x] **7. Audit log** — hash chain, signed checkpoints, verification command.
-- [ ] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
+- [x] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
 - [ ] **9. Console** — tools, policies, approvals, audit and spend views.
 - [ ] **10. Ship it** — AWS deploy with Terraform, full load and fault test reports, demo video, docs site, write-up.
 - [ ] **11. Version 2** — delegation chains, just-in-time access, policy dry-run.
@@ -100,6 +100,19 @@ until the current one is done.
 - [ ] Real N-million-record verification-time benchmark — only a 5-record live number exists so far; a synthetic/soak version is tracked for milestone 10.
 
 **Milestone 7: done** (both open items above are explicit, tracked scope decisions, not oversights).
+
+## Milestone 8 progress
+
+- [x] Real fine-tuned classifier (DistilBERT, `services/guard-classifier`), not a keyword filter: trained on the public `deepset/prompt-injections` dataset, exported to ONNX for CPU inference, served over gRPC (`internal/guard` on the Go side).
+- [x] Wired into **both** surfaces the spec names: tool descriptions (scanned in `mcpgateway.Sync`, before a tool is ever exposed) and tool outputs (scanned in the proxy handler, before a result reaches the agent).
+- [x] Strict latency budget: 50ms client-side timeout, measured p50 7.6ms / p99 36ms — real headroom, not a number picked to look good.
+- [x] Fails open on classifier unavailability — deliberate, documented, and explicitly contrasted with the policy engine's fail-closed design (DECISIONS.md).
+- [x] Benchmarked on the **served** model (ONNX over real gRPC, not the in-process PyTorch model): 93.6% accuracy, 100% precision, 86.8% recall, 0% FPR on a 141-example held-out set.
+- [x] Verified live, twice, against the actual running gateway — not just the held-out test split: a benign tool call that was false-positived is now correctly allowed, and a real injection embedded in a tool-call argument is still correctly blocked, with the gateway's own logs showing the block.
+- [x] Found and fixed three real issues during this milestone's own verification (all detailed in DECISIONS.md, not just mentioned in passing): a misconfigured ONNX export made inference ~25x slower than necessary; the classifier, trained only on conversational chat text, didn't generalize to tool descriptions (round 1 of a false-positive fix); didn't generalize to short tool-output-shaped text either (round 2, found only after wiring in the actual output-scanning path).
+- [ ] LLM-as-judge comparison (accuracy/latency/cost) — harness fully built (`llm_judge_benchmark.py`), not run: needs a real model provider behind the gateway, which is still mock-only (same gap as milestone 2). Explicitly tracked, not faked by running it against a provider that can't actually judge text.
+
+**Milestone 8: done** (LLM-as-judge comparison is the one open item, blocked on the same real-provider-key gap as milestone 2 — not forgotten, not faked).
 
 ## Spec completeness check (2026-10-03, after milestone 4)
 

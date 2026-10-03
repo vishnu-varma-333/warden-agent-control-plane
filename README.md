@@ -49,6 +49,12 @@ Run the control API:
 go run ./cmd/control-api
 ```
 
+Run the guard classifier (see `services/guard-classifier/README.md` for first-time setup — venv, training, ONNX export):
+
+```bash
+cd services/guard-classifier && source .venv/bin/activate && python3 server.py
+```
+
 Jaeger UI for traces: http://localhost:16686
 
 ## Status
