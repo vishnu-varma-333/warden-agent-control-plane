@@ -7,7 +7,7 @@ until the current one is done.
 - [x] **2. Model gateway** — streaming passthrough to 2+ providers, API keys, fallback, circuit breakers, exact caching. First latency benchmark.
 - [x] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
 - [x] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
-- [ ] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
+- [x] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
 - [ ] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
 - [ ] **7. Audit log** — hash chain, signed checkpoints, verification command.
 - [ ] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
@@ -60,6 +60,19 @@ until the current one is done.
 - [x] Found and fixed a real bug during that verification: the upstream client session doesn't survive the upstream process restarting; added reconnect-on-failure to both the sync loop and the call-proxying path.
 
 **Milestone 4: done.**
+
+## Milestone 5 progress
+
+- [x] `internal/policy`: Cedar policy engine (official `cedar-go`), versioned policies in Postgres (partial-unique-index enforces exactly one active version), compiled policy refreshed on a 10s poll so activating a new version takes effect without a restart.
+- [x] Redis decision cache keyed on `(policy version, agent, actingAs, action, resource)` — a version bump invalidates every cached decision implicitly, no explicit cache-busting pass needed.
+- [x] Every decision logged (allow/deny, matching policy IDs, cache hit or not) — not yet tamper-evident (that's milestone 7's job specifically).
+- [x] Wired into **both** call paths: model calls (`httpapi.ChatHandler`) and tool calls (`mcpgateway`'s per-call identity resolution via `RequestExtra.Header`, since one MCP session can carry calls acting as different users).
+- [x] Fails closed: unit-tested (`TestFailsClosedBeforeAnyPolicyLoaded`) and contrasted explicitly with rate-limit/budget's fail-open in DECISIONS.md.
+- [x] Verified live: permit → 200, default-deny (no matching rule) → 403, and forbid-overrides-permit through the real MCP proxy (`echo` allowed for user-1, denied for user-2 by an explicit forbid rule) — not just unit tests.
+- [x] Found and fixed a real ordering bug during this milestone: the response cache is keyed on content only (not principal), so policy now runs *before* the cache lookup — otherwise a denied agent could receive another agent's cached answer. Documented in DECISIONS.md.
+- [x] Found and documented a real, honest limitation: `tools/list` isn't policy-filtered (shows the same list to everyone); only `tools/call` is policy-gated. Visibility isn't the security boundary, invocation is — but it's worth knowing, not discovering later.
+
+**Milestone 5: done.**
 
 ## Spec completeness check (2026-10-03, after milestone 4)
 

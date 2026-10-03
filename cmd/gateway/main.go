@@ -21,6 +21,7 @@ import (
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/mcpgateway"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider/mock"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
@@ -101,8 +102,6 @@ func main() {
 	limiter := ratelimit.New(redisClient, requestsPerMinute, time.Minute)
 	budgetEnforcer := budget.New(redisClient, 100, time.Hour)
 
-	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache, RateLimit: limiter, Budget: budgetEnforcer}
-
 	pgDSN := os.Getenv("DATABASE_URL")
 	if pgDSN == "" {
 		pgDSN = "postgres://warden:warden@localhost:5432/warden?sslmode=disable"
@@ -114,8 +113,21 @@ func main() {
 	}
 	defer pgConn.Close()
 
+	policyEngine := policy.New(pgConn, redisClient)
+	if err := policyEngine.SeedIfEmpty(ctx); err != nil {
+		slog.Error("policy seed failed", "error", err)
+		os.Exit(1)
+	}
+	if err := policyEngine.Refresh(ctx); err != nil {
+		slog.Error("initial policy load failed", "error", err)
+		os.Exit(1)
+	}
+	policyEngine.StartPeriodicRefresh(ctx, 10*time.Second)
+
+	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache, RateLimit: limiter, Budget: budgetEnforcer, Policy: policyEngine}
+
 	toolRegistry := registry.New(pgConn)
-	mcpGW := mcpgateway.New(toolRegistry, &mcp.Implementation{Name: "warden", Version: "v1"})
+	mcpGW := mcpgateway.New(toolRegistry, policyEngine, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
 
 	demoMCPAddr := os.Getenv("DEMO_MCP_URL")
 	if demoMCPAddr == "" {

@@ -14,6 +14,7 @@ import (
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/router"
@@ -64,6 +65,7 @@ type ChatHandler struct {
 	Cache     *cache.Cache
 	RateLimit *ratelimit.Limiter
 	Budget    *budget.Budget
+	Policy    *policy.Engine
 }
 
 // costPerCall is a placeholder until milestone 2's real provider integration
@@ -72,11 +74,46 @@ type ChatHandler struct {
 // without pretending to know a real dollar cost yet.
 const costPerCall = 1.0
 
+// ServeHTTP's check order is deliberate, not incidental:
+//
+//  1. Parse the body first — the policy decision needs to know *which*
+//     model is being requested, so it has to happen before any check that
+//     depends on that.
+//  2. Policy BEFORE rate limit/budget — a denied call shouldn't consume
+//     either quota; only work Warden actually permits should count against
+//     them.
+//  3. Policy BEFORE the cache lookup — this one is a correctness issue,
+//     not just efficiency: the response cache (internal/cache) is keyed
+//     only on model+messages, not on who's asking, so it's shared across
+//     every agent/user. If the cache were checked before authorization, an
+//     agent denied access to a model could still receive another agent's
+//     cached answer for it. Checking policy first closes that.
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.FromContext(r.Context())
 	if !ok {
 		// Defensive only: identity.Middleware should already guarantee this.
 		http.Error(w, "no authenticated principal", http.StatusUnauthorized)
+		return
+	}
+
+	var req chatCompletionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.Model == "" || len(req.Messages) == 0 {
+		http.Error(w, "model and messages are required", http.StatusBadRequest)
+		return
+	}
+
+	decision, err := h.Policy.Authorize(r.Context(), principal.AgentID, principal.ActingAs, "CallModel", "Model", req.Model)
+	if err != nil {
+		slog.Error("policy check failed", "agent", principal.AgentID, "error", err)
+		http.Error(w, "policy check failed", http.StatusServiceUnavailable)
+		return
+	}
+	if !decision.Allow {
+		http.Error(w, fmt.Sprintf("denied by policy (version %d): %v", decision.PolicyVersion, decision.Reasons), http.StatusForbidden)
 		return
 	}
 
@@ -91,16 +128,6 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Error("budget check failed, allowing request", "agent", principal.AgentID, "error", err)
 	} else if !allowed {
 		http.Error(w, fmt.Sprintf("budget exceeded (at %v)", total), http.StatusPaymentRequired)
-		return
-	}
-
-	var req chatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
-		return
-	}
-	if req.Model == "" || len(req.Messages) == 0 {
-		http.Error(w, "model and messages are required", http.StatusBadRequest)
 		return
 	}
 

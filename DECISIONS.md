@@ -240,3 +240,57 @@ deployment (milestone 10), since Tempo's usual pairing is Grafana+Loki+
 Tempo as one coherent stack, which matters once Prometheus/Grafana
 actually exist (see docs/MILESTONES.md's "Spec completeness check" —
 metrics/dashboards aren't built yet either).
+
+## 2026-10-03 — Policy gates the call, not the tool list
+
+**What happens:** `tools/list` through the MCP gateway shows every tool
+the registry trusts (active, unpoisoned), regardless of who's asking.
+Policy is only evaluated on `tools/call`. So an agent can see a tool in
+the list and then have the actual call denied by policy — proven live:
+`echo` appears in `tools/list` for both `user-1` and `user-2`, but calling
+it only succeeds for `user-1` (the seed policy's forbid rule blocks
+`user-2` specifically).
+
+**Why this is the right tradeoff, not just the easy one:** the tool list
+is built once per upstream sync (`Gateway.Sync`), shared across every
+caller — policy decisions are per-principal and would require either
+re-listing per distinct (agent, actingAs) pair on every sync, or
+filtering the list per-request instead of serving a precomputed one.
+Neither is free, and critically, **visibility isn't the security
+boundary — the call is**. Seeing a tool name and description isn't a
+capability; invoking it is, and invocation is where the policy check
+actually runs, which is why the live test above is still a legitimate
+proof of enforcement despite the list looking the same to both users.
+
+**Cost:** this can look confusing from an agent's perspective (why does
+listing show a tool I then can't call?), and it means Warden can't yet
+offer "only show me what I'm actually allowed to do" — which is a real,
+better UX some authorization gateways provide. Worth revisiting once the
+console (milestone 9) needs to show this kind of thing to a human anyway.
+
+## 2026-10-03 — Found via design review: policy must run before the cache lookup
+
+**What was wrong:** `internal/cache`'s response cache (milestone 2) is
+keyed only on model + messages — deliberately, so identical requests from
+*different* agents can share a cache hit. But that means it has no concept
+of who's asking. While wiring the policy engine into `httpapi.ChatHandler`,
+checking the handler's existing order (rate limit → budget → cache →
+router) surfaced a real bug: if the cache were checked before policy, an
+agent *denied* access to a model could still receive another agent's
+cached answer for that same model, since the cache has no idea a
+particular caller isn't authorized.
+
+**Fix:** reordered so policy runs first, before rate limit, budget, or the
+cache lookup — see the ordering comment directly on `ChatHandler.ServeHTTP`
+in `internal/httpapi/chat.go`. Policy also runs before rate-limit/budget
+for a separate, non-security reason: a denied call shouldn't consume
+either quota.
+
+**Why this is worth recording on its own:** it was never exercised by any
+request in testing — mock-only testing with one agent identity doesn't
+surface an authorization bypass that only exists when *multiple* principals
+share a cache. It was caught by re-reading the request path with the new
+policy requirement in mind, which is the actual argument for doing a
+design pass instead of only testing the happy path: some classes of bug
+only show up when you ask "what's the right order for these checks," not
+"does this specific test pass."

@@ -12,10 +12,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
 )
 
@@ -26,6 +29,8 @@ type UpstreamConfig struct {
 
 type Gateway struct {
 	registry *registry.Registry
+	policy   *policy.Engine
+	verifier *identity.Verifier
 	outward  *mcp.Server
 	impl     *mcp.Implementation
 
@@ -34,9 +39,11 @@ type Gateway struct {
 	configs  map[string]UpstreamConfig
 }
 
-func New(reg *registry.Registry, impl *mcp.Implementation) *Gateway {
+func New(reg *registry.Registry, pol *policy.Engine, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
 	return &Gateway{
 		registry: reg,
+		policy:   pol,
+		verifier: verifier,
 		outward:  mcp.NewServer(impl, nil),
 		impl:     impl,
 		sessions: make(map[string]*mcp.ClientSession),
@@ -172,6 +179,27 @@ func (g *Gateway) Sync(ctx context.Context, upstreamName string) error {
 func (g *Gateway) proxyHandler(upstreamName string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		toolName := req.Params.Name
+
+		// Identity is resolved per call, not once per connection: a single
+		// MCP session can carry many tools/call requests, and each one
+		// brings its own Authorization/X-Acting-As headers (RequestExtra),
+		// which may differ between calls.
+		var header http.Header
+		if extra := req.GetExtra(); extra != nil {
+			header = extra.Header
+		}
+		principal, err := identity.ResolveFromHeader(g.verifier, header)
+		if err != nil {
+			return nil, fmt.Errorf("mcpgateway: %w", err)
+		}
+
+		decision, err := g.policy.Authorize(ctx, principal.AgentID, principal.ActingAs, "CallTool", "Tool", toolName)
+		if err != nil {
+			return nil, fmt.Errorf("mcpgateway: policy check failed: %w", err)
+		}
+		if !decision.Allow {
+			return nil, fmt.Errorf("mcpgateway: denied by policy (version %d): %v", decision.PolicyVersion, decision.Reasons)
+		}
 
 		status, ok, err := g.registry.Status(ctx, upstreamName, toolName)
 		if err != nil {

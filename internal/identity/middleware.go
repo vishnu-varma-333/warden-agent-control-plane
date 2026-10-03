@@ -22,6 +22,34 @@ func FromContext(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
+// ResolveFromHeader does the same Bearer-token + X-Acting-As resolution
+// Middleware does, as a standalone function. It exists because the MCP
+// proxy handler needs identity resolved per tool call (using headers the
+// SDK hands it via RequestExtra), not just once when the HTTP connection to
+// /mcp opened — a single MCP session can carry many tool calls, potentially
+// claiming different acting-as users across calls.
+func ResolveFromHeader(v *Verifier, h http.Header) (Principal, error) {
+	tokenString, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
+	if !ok || tokenString == "" {
+		return Principal{}, fmt.Errorf("missing Authorization: Bearer <token>")
+	}
+
+	id, err := v.Verify(tokenString)
+	if err != nil {
+		return Principal{}, fmt.Errorf("invalid token: %w", err)
+	}
+
+	actingAs := h.Get("X-Acting-As")
+	if actingAs == "" {
+		return Principal{}, fmt.Errorf("missing X-Acting-As header")
+	}
+	if !slices.Contains(id.ActingAsAllowed, actingAs) {
+		return Principal{}, fmt.Errorf("agent %q may not act as %q", id.AgentID, actingAs)
+	}
+
+	return Principal{AgentID: id.AgentID, ActingAs: actingAs}, nil
+}
+
 // Middleware requires a Bearer token (verified against Keycloak) and an
 // X-Acting-As header naming a user the token's agent is allowed to act for.
 // Every downstream handler can then trust that both identities are real and
@@ -29,29 +57,19 @@ func FromContext(ctx context.Context) (Principal, bool) {
 func Middleware(v *Verifier) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tokenString, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok || tokenString == "" {
-				http.Error(w, "missing Authorization: Bearer <token>", http.StatusUnauthorized)
-				return
-			}
-
-			id, err := v.Verify(tokenString)
+			p, err := ResolveFromHeader(v, r.Header)
 			if err != nil {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
+				status := http.StatusUnauthorized
+				if strings.Contains(err.Error(), "X-Acting-As") {
+					status = http.StatusBadRequest
+				} else if strings.Contains(err.Error(), "may not act as") {
+					status = http.StatusForbidden
+				}
+				http.Error(w, err.Error(), status)
 				return
 			}
 
-			actingAs := r.Header.Get("X-Acting-As")
-			if actingAs == "" {
-				http.Error(w, "missing X-Acting-As header", http.StatusBadRequest)
-				return
-			}
-			if !slices.Contains(id.ActingAsAllowed, actingAs) {
-				http.Error(w, fmt.Sprintf("agent %q may not act as %q", id.AgentID, actingAs), http.StatusForbidden)
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), principalKey{}, Principal{AgentID: id.AgentID, ActingAs: actingAs})
+			ctx := context.WithValue(r.Context(), principalKey{}, p)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
