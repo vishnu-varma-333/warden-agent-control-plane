@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
@@ -30,6 +31,7 @@ type UpstreamConfig struct {
 type Gateway struct {
 	registry *registry.Registry
 	policy   *policy.Engine
+	approval *approval.Manager // nil means no approval gating is configured
 	verifier *identity.Verifier
 	outward  *mcp.Server
 	impl     *mcp.Implementation
@@ -39,10 +41,11 @@ type Gateway struct {
 	configs  map[string]UpstreamConfig
 }
 
-func New(reg *registry.Registry, pol *policy.Engine, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
+func New(reg *registry.Registry, pol *policy.Engine, appr *approval.Manager, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
 	return &Gateway{
 		registry: reg,
 		policy:   pol,
+		approval: appr,
 		verifier: verifier,
 		outward:  mcp.NewServer(impl, nil),
 		impl:     impl,
@@ -201,6 +204,22 @@ func (g *Gateway) proxyHandler(upstreamName string) mcp.ToolHandler {
 			return nil, fmt.Errorf("mcpgateway: denied by policy (version %d): %v", decision.PolicyVersion, decision.Reasons)
 		}
 
+		if g.approval != nil {
+			needsApproval, err := g.approval.RequiresApproval(ctx, "CallTool", "Tool", toolName)
+			if err != nil {
+				return nil, fmt.Errorf("mcpgateway: approval rule check failed: %w", err)
+			}
+			if needsApproval {
+				result, err := g.waitForApprovalThenProceed(ctx, header, principal, toolName)
+				if err != nil || result != nil {
+					return result, err
+				}
+				// result == nil, err == nil: approved, execution not yet
+				// claimed by anyone else — fall through to the normal path
+				// below, which performs the actual proxy call.
+			}
+		}
+
 		status, ok, err := g.registry.Status(ctx, upstreamName, toolName)
 		if err != nil {
 			return nil, fmt.Errorf("mcpgateway: status check: %w", err)
@@ -235,6 +254,56 @@ func (g *Gateway) proxyHandler(upstreamName string) mcp.ToolHandler {
 			}
 		}
 		return result, err
+	}
+}
+
+// waitForApprovalThenProceed requests (or resumes waiting on) a durable
+// approval, blocking the caller until it's decided or expires. On return:
+//   - (non-nil result, nil error): the call is fully handled already
+//     (rejected, expired, or already executed by a concurrent/retried
+//     request) — the caller must return this as-is, not proceed further.
+//   - (nil, non-nil error): something failed outright.
+//   - (nil, nil): approved AND this call won the execution claim — the
+//     caller should fall through and perform the real proxy call.
+func (g *Gateway) waitForApprovalThenProceed(ctx context.Context, header http.Header, principal identity.Principal, toolName string) (*mcp.CallToolResult, error) {
+	idempotencyKey := header.Get("X-Idempotency-Key") // optional; see DECISIONS.md on why it's caller-supplied, not inferred
+
+	a, err := g.approval.Request(ctx, idempotencyKey, approval.CallSnapshot{
+		AgentID: principal.AgentID, ActingAs: principal.ActingAs,
+		Action: "CallTool", ResourceType: "Tool", ResourceID: toolName,
+	}, 5*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("mcpgateway: request approval: %w", err)
+	}
+
+	state := a.State
+	if state == approval.StatePending {
+		slog.Info("mcp call paused for approval", "approvalID", a.ID, "tool", toolName)
+		state, err = g.approval.WaitForDecision(ctx, a.ID, time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("mcpgateway: wait for approval: %w", err)
+		}
+	}
+
+	switch state {
+	case approval.StateRejected:
+		return nil, fmt.Errorf("mcpgateway: call to %q was rejected by approval %s", toolName, a.ID)
+	case approval.StateExpired:
+		return nil, fmt.Errorf("mcpgateway: approval %s for %q expired before a decision was made", a.ID, toolName)
+	case approval.StateApproved:
+		claimed, err := g.approval.ClaimExecution(ctx, a.ID)
+		if err != nil {
+			return nil, fmt.Errorf("mcpgateway: claim execution: %w", err)
+		}
+		if !claimed {
+			slog.Info("approved call already executed by another request; not duplicating", "approvalID", a.ID, "tool", toolName)
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "already executed (approval " + a.ID + "); not repeating the action"}},
+			}, nil
+		}
+		return nil, nil // claimed: proceed to the real call
+	default:
+		return nil, fmt.Errorf("mcpgateway: approval %s in unexpected state %q", a.ID, state)
 	}
 }
 

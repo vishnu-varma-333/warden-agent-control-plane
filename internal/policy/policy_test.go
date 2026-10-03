@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"os"
 	"testing"
 
@@ -47,27 +48,49 @@ func newTestEngine(t *testing.T, source string) *Engine {
 	return e
 }
 
-// uniqueVersion derives a stable-per-test, unlikely-to-collide int from the
-// test name, so parallel/repeated runs don't fight over the single-active
-// partial-unique-index invariant.
+// uniqueVersion must be fresh per RUN, not just per test name: the Redis
+// decision cache is keyed on the policy version (see policy.go), with no
+// explicit cleanup. A deterministic, name-derived version collides with
+// itself on a second run within the cache's TTL, making a cache MISS look
+// like a HIT — this is exactly how TestDecisionIsCachedOnSecondCall failed
+// when the suite was run twice in a row. A random version per run sidesteps
+// it entirely: a stale cache entry from a prior run is keyed to a version
+// number this run will never ask for again.
 func uniqueVersion(t *testing.T) int {
-	h := 0
-	for _, c := range t.Name() {
-		h = h*31 + int(c)
-	}
-	if h < 0 {
-		h = -h
-	}
-	return 100000 + (h % 100000)
+	return 100000 + rand.Intn(900000)
 }
 
+// deactivateAllAndInsert swaps in a test-only active policy, and restores
+// whatever was active before on cleanup — without this, running these
+// tests against the same Postgres a dev gateway is pointed at would
+// permanently leave that gateway with no active policy (and therefore,
+// per the fail-closed design, denying everything) once the test exits.
+// This is not hypothetical: it happened during this milestone's own
+// verification, which is exactly why it's fixed rather than left as a
+// "don't run tests against a live dev DB" caveat.
 func deactivateAllAndInsert(t *testing.T, conn *sql.DB, version int, source string) {
 	t.Helper()
 	ctx := context.Background()
+
+	var previouslyActive []int
+	rows, err := conn.QueryContext(ctx, `SELECT version FROM policies WHERE active = true`)
+	if err != nil {
+		t.Fatalf("read previously active versions: %v", err)
+	}
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			t.Fatalf("scan previously active version: %v", err)
+		}
+		previouslyActive = append(previouslyActive, v)
+	}
+	rows.Close()
+
 	if _, err := conn.ExecContext(ctx, `UPDATE policies SET active = false WHERE active = true`); err != nil {
 		t.Fatalf("deactivate existing: %v", err)
 	}
-	_, err := conn.ExecContext(ctx,
+	_, err = conn.ExecContext(ctx,
 		`INSERT INTO policies (version, cedar_source, active) VALUES ($1, $2, true)
 		 ON CONFLICT (version) DO UPDATE SET cedar_source = EXCLUDED.cedar_source, active = true`,
 		version, source,
@@ -75,8 +98,13 @@ func deactivateAllAndInsert(t *testing.T, conn *sql.DB, version int, source stri
 	if err != nil {
 		t.Fatalf("insert test policy: %v", err)
 	}
+
 	t.Cleanup(func() {
-		conn.ExecContext(context.Background(), `DELETE FROM policies WHERE version = $1`, version)
+		ctx := context.Background()
+		conn.ExecContext(ctx, `DELETE FROM policies WHERE version = $1`, version)
+		for _, v := range previouslyActive {
+			conn.ExecContext(ctx, `UPDATE policies SET active = true WHERE version = $1`, v)
+		}
 	})
 }
 

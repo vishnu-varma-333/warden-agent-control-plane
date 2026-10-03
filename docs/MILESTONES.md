@@ -8,7 +8,7 @@ until the current one is done.
 - [x] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
 - [x] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
 - [x] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
-- [ ] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
+- [x] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
 - [ ] **7. Audit log** — hash chain, signed checkpoints, verification command.
 - [ ] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
 - [ ] **9. Console** — tools, policies, approvals, audit and spend views.
@@ -73,6 +73,19 @@ until the current one is done.
 - [x] Found and documented a real, honest limitation: `tools/list` isn't policy-filtered (shows the same list to everyone); only `tools/call` is policy-gated. Visibility isn't the security boundary, invocation is — but it's worth knowing, not discovering later.
 
 **Milestone 5: done.**
+
+## Milestone 6 progress
+
+- [x] `internal/approval`: full state machine (pending/approved/rejected/expired) in Postgres. Atomic decide (can't double-decide), atomic execution claim (can't double-execute, verified with 20 concurrent goroutines under `-race`), client-supplied idempotency keys (never server-derived — see DECISIONS.md), lazy + periodic expiry.
+- [x] Notifications: `LogNotifier` (default, logs the approve/reject curl commands) and a real `WebhookNotifier` (configurable `WEBHOOK_URL`) — same mock-first/real-plug-in pattern as the rest of the project.
+- [x] `approval_rules` table: independent of Cedar policy — a call can be policy-permitted and still require a human to sign off. Wired into the MCP tool-call path.
+- [x] control-api wired up for real for the first time: its own Postgres connection, `POST /approvals/{id}/decide`, `GET /approvals/{id}`, `GET /approvals?state=`.
+- [x] Verified with a real kill test, not just unit tests: `kill -9`'d the gateway mid-pending-approval, confirmed the approval survived in Postgres, restarted, approved, and confirmed via the downstream tool's own call counter that it executed exactly once even after two retries. Full writeup in `docs/BENCHMARKS.md`.
+- [x] Found and fixed two real test-hygiene bugs while verifying this (not demo issues — bugs that would have silently broken a running dev gateway): the approval dedup test didn't clean up its rows, and the policy tests deactivated whatever policy was live and never restored it. Both documented in DECISIONS.md.
+- [x] Found and fixed a real operational gap: editing `DefaultSeedPolicy` in code doesn't retroactively update an already-seeded database row — seeding only ever happens once. The correct fix is activating a new policy version, which is exactly what got demonstrated live (version 1 → version 2, picked up by the gateway's existing 10s poll with no restart needed).
+- [ ] Statistical 1,000-run kill-test benchmark (vs. this milestone's one fully-reasoned kill test) — tracked as a follow-up for the milestone 10 benchmark pass.
+
+**Milestone 6: done** (1,000-run statistical benchmark explicitly deferred, not silently skipped).
 
 ## Spec completeness check (2026-10-03, after milestone 4)
 

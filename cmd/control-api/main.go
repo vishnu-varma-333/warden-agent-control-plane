@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -41,8 +44,37 @@ func main() {
 		addr = ":8081"
 	}
 
+	pgDSN := os.Getenv("DATABASE_URL")
+	if pgDSN == "" {
+		pgDSN = "postgres://warden:warden@localhost:5432/warden?sslmode=disable"
+	}
+	pgConn, err := db.Connect(pgDSN)
+	if err != nil {
+		slog.Error("database connect/migrate failed", "error", err)
+		os.Exit(1)
+	}
+	defer pgConn.Close()
+
+	controlAPIBaseURL := os.Getenv("CONTROL_API_BASE_URL")
+	if controlAPIBaseURL == "" {
+		controlAPIBaseURL = "http://localhost" + addr
+	}
+	var notifier approval.Notifier
+	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
+		notifier = &approval.WebhookNotifier{URL: webhookURL}
+	} else {
+		notifier = &approval.LogNotifier{ControlAPIBaseURL: controlAPIBaseURL}
+	}
+	approvalManager := approval.New(pgConn, notifier)
+	approvalManager.StartExpirySweep(ctx, 10*time.Second)
+
+	approvalsHandler := &httpapi.ApprovalsHandler{Manager: approvalManager}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("POST /approvals/{id}/decide", approvalsHandler.Decide)
+	mux.HandleFunc("GET /approvals/{id}", approvalsHandler.Get)
+	mux.HandleFunc("GET /approvals", approvalsHandler.List)
 
 	srv := &http.Server{
 		Addr:         addr,

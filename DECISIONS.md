@@ -268,6 +268,109 @@ offer "only show me what I'm actually allowed to do" — which is a real,
 better UX some authorization gateways provide. Worth revisiting once the
 console (milestone 9) needs to show this kind of thing to a human anyway.
 
+## 2026-10-03 — Idempotency keys are client-supplied, never server-derived
+
+**Options:** derive an idempotency key automatically from the call's
+content (e.g. hash of agent+action+resource), vs. require the caller to
+supply one explicitly (`X-Idempotency-Key`), with no dedup at all if they
+don't.
+
+**Chose:** client-supplied only (`internal/approval`'s `Request`; NULL
+key = Postgres never treats two NULLs as equal, so no dedup happens by
+default — a deliberate, safe default, not an oversight).
+
+**Why:** only the caller actually knows whether two calls are "the same
+operation being retried" or "two separate operations that happen to look
+identical" — e.g. an agent calling `delete_data` twice in a row, once for
+real each time, is two separate approvable actions, not one. A
+content-derived key would silently merge them into a single approval,
+which means approving the first would also silently let the second
+through without a human ever seeing it. This is the same reasoning Stripe
+and most real payment/distributed-systems APIs use for idempotency keys.
+
+**Cost:** a caller that doesn't supply a key gets no crash-safety for its
+retries — every retry is a brand new approval request. That's the correct
+default (safety through explicitness), but it does mean the durability
+guarantee only helps callers that opt in.
+
+## 2026-10-03 — Found via live testing: a code change to the seed policy doesn't reach an already-seeded database
+
+**What happened:** `delete_data` was added to `DefaultSeedPolicy` in code,
+but the live gateway still denied it — because `SeedIfEmpty` only ever
+seeds once, the first time the `policies` table is empty. Changing the Go
+constant afterward has no effect on a database that already has a version
+1 row.
+
+**This is not a bug in the versioning design — it's what versioning is
+for.** The fix demonstrated during verification was the correct one:
+insert a new version (2) with the updated source and activate it, rather
+than mutating version 1's `cedar_source` in place (which was tried first,
+then deliberately undone — see the live verification log — because it
+defeats the entire point of "old versions kept for audit"). The gateway's
+existing 10-second poll picked up version 2 automatically, no restart
+needed.
+
+**Why worth recording:** it's a realistic preview of the actual
+operational question "how do you ship a policy change" — the answer is
+"insert and activate a new version," never "edit the seed and redeploy."
+
+## 2026-10-03 — Found via testing: two tests silently corrupted shared dev-database state
+
+**What happened:** running the full test suite twice in a row (not an
+exotic scenario — just re-running `go test ./...`) surfaced two real
+hygiene bugs, both caught because tests here run against the same
+Postgres/Redis a manually-run gateway uses, not an isolated throwaway
+database:
+
+1. `TestRequestWithSameKeyDeduplicatesAndNotifiesOnce` (approval package)
+   never deleted its rows. A second run's "first" request collided with
+   the first run's leftover row, making it look like a conflict instead
+   of a fresh insert — the test failed, correctly, because the test
+   itself was wrong, not the code.
+2. `deactivateAllAndInsert` (policy package tests) deactivated whatever
+   policy was currently active to install its own test policy, then only
+   ever cleaned up its own row — never reactivating what it had turned
+   off. Running the policy tests against the same database a dev gateway
+   uses left that gateway with **no active policy at all**, which — per
+   the fail-closed design — meant it started denying every single
+   request. This was caught directly: the gateway logged
+   `"initial policy load failed"` after a test run, mid-milestone-6
+   verification.
+
+**Fix:** approval tests now delete their own rows via `t.Cleanup`. Policy
+tests now record which version(s) were active *before* swapping in a test
+policy, and restore that in `t.Cleanup` — not just delete their own row.
+
+**Why this is worth its own entry:** fail-closed (an earlier deliberate
+decision, see milestone 3's DECISIONS.md entries) did exactly its job here
+— it turned a test-hygiene bug into a loud, obvious failure (nothing
+authorizes) instead of a silent one (everything authorizes). That's the
+argument for fail-closed in concrete terms, not just in the abstract.
+
+## 2026-10-03 — Polling for approval decisions, not Postgres LISTEN/NOTIFY
+
+**Options:** `WaitForDecision` polls the approvals table on an interval
+(1s in production use, faster in tests) vs. using Postgres's native
+LISTEN/NOTIFY to be woken immediately when a decision lands.
+
+**Chose:** polling.
+
+**Why:** LISTEN/NOTIFY needs a dedicated, non-pooled connection per
+listener — `database/sql`'s connection pooling model doesn't support it
+cleanly; doing it properly means dropping to `pgx`'s native pool and
+managing listener connections as a separate concern from everything else
+already using `database/sql`. Polling is a few dozen lines, trivially
+correct, and the added latency (up to one poll interval before a waiter
+notices a decision) is irrelevant here — approvals are a human-timescale
+operation (minutes), not a hot-path one, so shaving the last second off
+detection latency isn't where the engineering effort belongs for v1.
+
+**Cost:** every pending approval holds open a goroutine and a request
+connection, polling, for as long as it waits — this doesn't scale to a
+very large number of simultaneously-pending approvals the way a
+notify-based wakeup would. Worth revisiting if that ever becomes a real
+number instead of a hypothetical one.
+
 ## 2026-10-03 — Found via design review: policy must run before the cache lookup
 
 **What was wrong:** `internal/cache`'s response cache (milestone 2) is

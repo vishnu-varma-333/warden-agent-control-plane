@@ -15,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/redis/go-redis/v9"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
@@ -126,8 +127,25 @@ func main() {
 
 	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache, RateLimit: limiter, Budget: budgetEnforcer, Policy: policyEngine}
 
+	controlAPIBaseURL := os.Getenv("CONTROL_API_BASE_URL")
+	if controlAPIBaseURL == "" {
+		controlAPIBaseURL = "http://localhost:8081"
+	}
+	var approvalNotifier approval.Notifier
+	if webhookURL := os.Getenv("WEBHOOK_URL"); webhookURL != "" {
+		approvalNotifier = &approval.WebhookNotifier{URL: webhookURL}
+	} else {
+		approvalNotifier = &approval.LogNotifier{ControlAPIBaseURL: controlAPIBaseURL}
+	}
+	approvalManager := approval.New(pgConn, approvalNotifier)
+	if err := approvalManager.SeedRuleIfMissing(ctx, "CallTool", "Tool", "delete_data"); err != nil {
+		slog.Error("approval rule seed failed", "error", err)
+		os.Exit(1)
+	}
+	approvalManager.StartExpirySweep(ctx, 10*time.Second)
+
 	toolRegistry := registry.New(pgConn)
-	mcpGW := mcpgateway.New(toolRegistry, policyEngine, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
+	mcpGW := mcpgateway.New(toolRegistry, policyEngine, approvalManager, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
 
 	demoMCPAddr := os.Getenv("DEMO_MCP_URL")
 	if demoMCPAddr == "" {

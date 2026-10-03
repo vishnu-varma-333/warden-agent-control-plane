@@ -43,6 +43,12 @@ permit(
     resource == Warden::Tool::"echo"
 );
 
+permit(
+    principal,
+    action == Warden::Action::"CallTool",
+    resource == Warden::Tool::"delete_data"
+);
+
 forbid(
     principal,
     action == Warden::Action::"CallTool",
