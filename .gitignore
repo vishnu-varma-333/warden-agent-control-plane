@@ -1,0 +1,28 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+.next/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Env / local
+.env
+.env.*
+*.local
+
+# OS
+.DS_Store
