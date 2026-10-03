@@ -11,8 +11,11 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/router"
 )
 
@@ -57,11 +60,40 @@ type chunkDelta struct {
 }
 
 type ChatHandler struct {
-	Router *router.Router
-	Cache  *cache.Cache
+	Router    *router.Router
+	Cache     *cache.Cache
+	RateLimit *ratelimit.Limiter
+	Budget    *budget.Budget
 }
 
+// costPerCall is a placeholder until milestone 2's real provider integration
+// reports actual token usage; see DECISIONS.md. It makes the budget
+// mechanism (atomic charge, correct across replicas) demonstrable now
+// without pretending to know a real dollar cost yet.
+const costPerCall = 1.0
+
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.FromContext(r.Context())
+	if !ok {
+		// Defensive only: identity.Middleware should already guarantee this.
+		http.Error(w, "no authenticated principal", http.StatusUnauthorized)
+		return
+	}
+
+	if allowed, err := h.RateLimit.Allow(r.Context(), principal.AgentID); err != nil {
+		slog.Error("rate limit check failed, allowing request", "agent", principal.AgentID, "error", err)
+	} else if !allowed {
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+
+	if allowed, total, err := h.Budget.Charge(r.Context(), principal.AgentID, costPerCall); err != nil {
+		slog.Error("budget check failed, allowing request", "agent", principal.AgentID, "error", err)
+	} else if !allowed {
+		http.Error(w, fmt.Sprintf("budget exceeded (at %v)", total), http.StatusPaymentRequired)
+		return
+	}
+
 	var req chatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)

@@ -9,13 +9,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider/mock"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/router"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -60,18 +64,45 @@ func main() {
 	if os.Getenv("MOCK_PRIMARY_UNHEALTHY") == "true" {
 		primary.SetUnhealthy(true)
 	}
+	if ms := os.Getenv("MOCK_PRIMARY_LATENCY_MS"); ms != "" {
+		if d, err := time.ParseDuration(ms + "ms"); err == nil {
+			primary.SetLatency(d)
+		}
+	}
 
 	r := router.New()
 	r.RegisterProvider(primary)
 	r.RegisterProvider(secondary)
 	r.AddRoute(router.Route{ModelAlias: "mock-model", Providers: []string{"mock-primary", "mock-secondary"}})
 
-	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache}
+	keycloakIssuer := os.Getenv("KEYCLOAK_ISSUER")
+	if keycloakIssuer == "" {
+		keycloakIssuer = "http://localhost:8180/realms/warden"
+	}
+	verifier, err := initIdentityVerifier(ctx, keycloakIssuer)
+	if err != nil {
+		slog.Error("identity verifier init failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Starting limits: 60 requests/minute and 100 cost-units/hour per agent.
+	// "Cost unit" is a placeholder (see httpapi.costPerCall) until real
+	// provider usage reporting exists. Overridable for local demos/tests.
+	requestsPerMinute := 60
+	if v := os.Getenv("RATE_LIMIT_PER_MINUTE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			requestsPerMinute = n
+		}
+	}
+	limiter := ratelimit.New(redisClient, requestsPerMinute, time.Minute)
+	budgetEnforcer := budget.New(redisClient, 100, time.Hour)
+
+	chatHandler := &httpapi.ChatHandler{Router: r, Cache: respCache, RateLimit: limiter, Budget: budgetEnforcer}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/readyz", handleReadyz)
-	mux.Handle("/v1/chat/completions", chatHandler)
+	mux.Handle("/v1/chat/completions", identity.Middleware(verifier)(chatHandler))
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -100,6 +131,29 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("gateway stopped cleanly")
+}
+
+// initIdentityVerifier retries fetching Keycloak's JWKS a few times: in
+// local dev, the gateway and Keycloak often start at roughly the same
+// time, and Keycloak's first boot (realm import) is slow enough that a
+// single immediate attempt would routinely lose this race.
+func initIdentityVerifier(ctx context.Context, issuer string) (*identity.Verifier, error) {
+	const attempts = 10
+	var lastErr error
+	for i := 1; i <= attempts; i++ {
+		v, err := identity.NewVerifier(ctx, issuer)
+		if err == nil {
+			return v, nil
+		}
+		lastErr = err
+		slog.Info("waiting for Keycloak", "attempt", i, "of", attempts, "error", err)
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, lastErr
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

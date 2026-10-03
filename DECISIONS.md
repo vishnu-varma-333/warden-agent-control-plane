@@ -122,3 +122,50 @@ initial call), the client currently just sees a truncated response with no
 retry. Revisit this once the audit log (milestone 7) exists — mid-stream
 failures need to be recorded either way, so that's a natural point to also
 add a clear error-terminated SSE event instead of silent truncation.
+
+## 2026-10-03 — "Acting as" via a hardcoded allowlist claim, not RFC 8693 token exchange
+
+**Options:** implement real OAuth token exchange (RFC 8693) — where an
+agent requests a fresh token scoped to exactly one user per call — vs. have
+each agent's client-credentials token carry a fixed list of users it's
+allowed to act for (via a Keycloak protocol mapper), and let the caller name
+one per request via a header.
+
+**Chose:** the hardcoded-allowlist version (`internal/identity`): the
+token's `acting_as_allowed` claim is checked against an `X-Acting-As`
+header on every call.
+
+**Why:** token exchange is a genuinely more correct model (a token scoped
+to one user can't be misused to claim a different one), but Keycloak's
+token-exchange support needs its own admin-side feature configuration and a
+second round-trip per call to actually request the exchanged token. The
+allowlist version proves the exact requirement this milestone cares about —
+"every call carries both the agent's identity and the user it acts for,
+and that pairing is authorized, not just claimed" — without that setup cost.
+
+**Cost:** the allowlist is static per-agent (configured once in Keycloak),
+not dynamic per-call. If an agent's set of permitted users needs to change
+at runtime without reissuing its client config, or if a true per-call
+scoped token is required for compliance reasons, this is the first thing to
+replace with real token exchange. Recorded here specifically so it's a
+visible, deliberate gap — not a thing discovered during an interview
+question about it.
+
+## 2026-10-03 — Rate limit and budget both fail open on a Redis error
+
+**Decision:** if the Redis call behind `ratelimit.Allow` or `budget.Charge`
+errors (e.g. Redis is down), the request is allowed through anyway — the
+error is logged, not enforced.
+
+**Why:** this is the "fail-open vs. fail-closed" talking point the original
+spec calls out, applied concretely: losing the rate limiter or budget
+tracker is a cost-control and fairness problem, not a security boundary —
+unlike the policy engine (milestone 5), where fail-open would mean
+unauthorized actions proceeding. Taking down the entire gateway because
+Redis hiccuped would trade a minor problem for a much bigger one.
+
+**Cost:** during a Redis outage, limits and budgets are silently
+unenforced rather than the gateway refusing traffic. Revisit this choice
+specifically when the policy engine lands — that one should almost
+certainly fail *closed*, and the contrast between the two is itself a good
+interview answer about *where* fail-open is and isn't acceptable.

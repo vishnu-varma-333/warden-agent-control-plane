@@ -5,7 +5,7 @@ until the current one is done.
 
 - [x] **1. Foundations** — repository, CI pipeline, local Kubernetes, PostgreSQL, Redis, Kafka, OpenTelemetry wired up.
 - [x] **2. Model gateway** — streaming passthrough to 2+ providers, API keys, fallback, circuit breakers, exact caching. First latency benchmark.
-- [ ] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
+- [x] **3. Identity and rate limits** — OAuth with Keycloak, on-behalf-of tokens, distributed rate limits and budgets.
 - [ ] **4. MCP gateway** — tool registry, proxying, definition pinning and change detection.
 - [ ] **5. Policy engine** — Cedar policies, versioning, decision cache, decision logging.
 - [ ] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
@@ -37,3 +37,15 @@ until the current one is done.
 - [ ] Real provider integration (OpenAI/Anthropic/other) — deferred until an API key is supplied; see DECISIONS.md.
 
 **Milestone 2: core logic done; real-provider wiring open pending an API key.**
+
+## Milestone 3 progress
+
+- [x] Keycloak running locally, realm/client defined as code (`deploy/docker/keycloak-realm.json`), not clicked through an admin UI.
+- [x] `internal/identity`: verifies OAuth access tokens against Keycloak's JWKS, extracts the agent identity (`azp` claim) and its "acting as" allowlist.
+- [x] Every call now requires both identities: a valid Bearer token (the agent) + an `X-Acting-As` header naming a user the token permits (the human).
+- [x] `internal/ratelimit`: distributed, Redis-backed, atomic via a Lua script — unit-tested per-key isolation and threshold behavior.
+- [x] `internal/budget`: distributed spend cap, atomic reject-without-partial-charge — unit-tested specifically for that atomicity.
+- [x] End-to-end verified live: 401 (no token) / 400 (no acting-as header) / 403 (disallowed acting-as user) / 200 (valid) / 429 (rate limit tripped, confirmed at a demo limit of 3).
+- [ ] Real token-exchange (RFC 8693) instead of the hardcoded-allowlist simplification — noted as a deliberate v1 simplification in DECISIONS.md, not a gap to silently carry forward.
+
+**Milestone 3: done** (simplification on token exchange documented, not hidden).
