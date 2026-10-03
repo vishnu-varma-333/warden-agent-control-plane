@@ -216,3 +216,27 @@ true example of why milestone benchmarks/tests have to involve actually
 *running* the thing, not just reading the code — this bug was invisible
 in both the unit tests and a first read-through, and only showed up when
 an upstream was deliberately restarted mid-session.
+
+## 2026-10-03 — Jaeger instead of Tempo, for local dev specifically
+
+**Spec says:** Prometheus, Grafana, OpenTelemetry, **Tempo**.
+
+**Built instead:** Jaeger, for trace storage/viewing in local dev
+(`deploy/docker/docker-compose.yml`, `deploy/k8s-local/observability.yaml`).
+
+**Why:** same reasoning as Redpanda-for-Kafka (see the earlier entry) —
+Warden's own code only ever speaks OTLP to the collector; it has zero
+awareness of what's downstream. Swapping the collector's export target
+from Jaeger to Tempo later is a one-line config change
+(`deploy/docker/otel-collector.yaml`'s exporter block), not an application
+change. Jaeger was picked for local dev purely because it's a simpler
+single-container run with a built-in UI, which is what mattered while
+building milestone 1.
+
+**Cost, stated plainly so it isn't mistaken for "done":** this is an
+unresolved substitution, not a finished decision — Tempo (or an explicit
+choice to keep Jaeger permanently) still needs to happen for the real AWS
+deployment (milestone 10), since Tempo's usual pairing is Grafana+Loki+
+Tempo as one coherent stack, which matters once Prometheus/Grafana
+actually exist (see docs/MILESTONES.md's "Spec completeness check" —
+metrics/dashboards aren't built yet either).

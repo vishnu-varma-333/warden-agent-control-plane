@@ -60,3 +60,43 @@ until the current one is done.
 - [x] Found and fixed a real bug during that verification: the upstream client session doesn't survive the upstream process restarting; added reconnect-on-failure to both the sync loop and the call-proxying path.
 
 **Milestone 4: done.**
+
+## Spec completeness check (2026-10-03, after milestone 4)
+
+Per-milestone tracking above is necessarily scoped to that milestone's own
+bullet. This section is a periodic cross-check against the FULL original
+spec (tech stack table + production-readiness section + data model), so
+nothing broader gets silently dropped. Re-run this check at each milestone
+boundary.
+
+**Found and tracked as explicit, not-forgotten gaps (not yet built):**
+
+- [ ] **Metrics + dashboards.** Tech stack lists Prometheus + Grafana;
+      production-readiness requires request rate, added latency (p50/p99),
+      decisions by type, approval queue depth, provider errors, cache hit
+      rate, plus alerts on error rate/latency SLO/audit-chain failures.
+      Only tracing (OTel → Jaeger) exists so far — no metrics exporter, no
+      Prometheus, no Grafana, no alerts. Natural point to add: as each
+      feature matures enough to have a meaningful dashboard, and/or a
+      dedicated pass before milestone 10 ("Ship it").
+- [ ] **Per-team scoping for budgets/rate limits.** Spec says "per-team
+      and per-agent"; only per-agent is wired (`internal/ratelimit`,
+      `internal/budget` take an arbitrary string scope, so a team ID would
+      work mechanically, but no Team entity/concept exists anywhere yet).
+      Natural point to add: when the console (milestone 9) needs to
+      manage teams anyway.
+- [ ] **Fault/kill/security test suites** (Toxiproxy network-fault tests,
+      kill tests beyond the manual ones done for milestone 1/4, a security
+      test suite of known injection/poisoning attacks). Explicitly a
+      production-readiness "Testing" requirement, not yet started.
+      Natural point to add: a dedicated testing pass, likely alongside or
+      just before milestone 10.
+- [ ] **Runbook.** Production-readiness docs requirement alongside
+      DECISIONS.md (actively maintained) and a written postmortem (N/A
+      until a real failure happens worth writing up).
+
+Nothing else found missing against the full spec as of this check — the 8
+core v1 features' milestones so far (1-4) match what the spec actually
+asked for them to do, including the harder-to-spot details (short-lived
+tokens, exact-match-not-fuzzy caching, "every call carries both
+identities," etc.).
