@@ -178,6 +178,62 @@ func TestDecisionIsCachedOnSecondCall(t *testing.T) {
 	}
 }
 
+func TestCreateVersionRejectsInvalidCedar(t *testing.T) {
+	e := newTestEngine(t, DefaultSeedPolicy)
+	if _, err := e.CreateVersion(context.Background(), "this is not cedar at all"); err == nil {
+		t.Fatal("expected an error for invalid cedar source")
+	}
+}
+
+func TestCreateListAndActivateVersion(t *testing.T) {
+	e := newTestEngine(t, DefaultSeedPolicy)
+	ctx := context.Background()
+
+	newSource := `permit(principal, action == Warden::Action::"CallModel", resource == Warden::Model::"mock-model");`
+	version, err := e.CreateVersion(ctx, newSource)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { e.db.ExecContext(context.Background(), `DELETE FROM policies WHERE version = $1`, version) })
+
+	versions, err := e.ListVersions(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var found bool
+	for _, v := range versions {
+		if v.Version == version {
+			found = true
+			if v.Active {
+				t.Fatal("expected a newly created version to start inactive")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected ListVersions to include the newly created version")
+	}
+
+	if err := e.Activate(ctx, version); err != nil {
+		t.Fatalf("unexpected error activating: %v", err)
+	}
+	versions, err = e.ListVersions(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var activeCount int
+	for _, v := range versions {
+		if v.Active {
+			activeCount++
+			if v.Version != version {
+				t.Fatalf("expected only version %d active, found version %d active too", version, v.Version)
+			}
+		}
+	}
+	if activeCount != 1 {
+		t.Fatalf("expected exactly one active version, got %d", activeCount)
+	}
+}
+
 func TestFailsClosedBeforeAnyPolicyLoaded(t *testing.T) {
 	// An Engine that never had Refresh succeed must deny, not allow.
 	e := &Engine{}

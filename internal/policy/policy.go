@@ -212,6 +212,86 @@ func (e *Engine) Authorize(ctx context.Context, agentID, actingAsUser, action, r
 	return decision, nil
 }
 
+// VersionRecord is one row of the policies table, as the console lists it.
+type VersionRecord struct {
+	Version     int       `json:"version"`
+	CedarSource string    `json:"cedarSource"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// ListVersions returns every policy version, newest first — what the
+// console's policies view shows an admin.
+func (e *Engine) ListVersions(ctx context.Context) ([]VersionRecord, error) {
+	rows, err := e.db.QueryContext(ctx,
+		`SELECT version, cedar_source, active, created_at FROM policies ORDER BY version DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("policy: list versions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []VersionRecord
+	for rows.Next() {
+		var v VersionRecord
+		if err := rows.Scan(&v.Version, &v.CedarSource, &v.Active, &v.CreatedAt); err != nil {
+			return nil, fmt.Errorf("policy: list versions scan: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// CreateVersion inserts a new, inactive policy version and returns its
+// version number. It compiles the Cedar source first and rejects anything
+// that doesn't parse — the console shouldn't be able to save a policy
+// that would fail every request once activated.
+func (e *Engine) CreateVersion(ctx context.Context, source string) (version int, err error) {
+	if _, err := cedar.NewPolicySetFromBytes("validate.cedar", []byte(source)); err != nil {
+		return 0, fmt.Errorf("policy: invalid cedar source: %w", err)
+	}
+	err = e.db.QueryRowContext(ctx,
+		`INSERT INTO policies (version, cedar_source, active)
+		 VALUES ((SELECT COALESCE(MAX(version), 0) + 1 FROM policies), $1, false)
+		 RETURNING version`,
+		source,
+	).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("policy: create version: %w", err)
+	}
+	return version, nil
+}
+
+// Activate makes version the single active policy, deactivating whatever
+// was active before it, atomically — the partial unique index on
+// policies(active) means two concurrent activations can't both win, and
+// this transaction means a reader never observes zero active versions.
+// The gateway's own periodic Refresh (not this call) is what makes the
+// change take effect, within its poll interval.
+func (e *Engine) Activate(ctx context.Context, version int) error {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("policy: activate: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE policies SET active = false WHERE active = true`); err != nil {
+		return fmt.Errorf("policy: activate: deactivate: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE policies SET active = true WHERE version = $1`, version)
+	if err != nil {
+		return fmt.Errorf("policy: activate: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("policy: activate: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("policy: activate: no version %d", version)
+	}
+	return tx.Commit()
+}
+
 func (e *Engine) publishAudit(ctx context.Context, d Decision, agentID, actingAsUser, action, resourceType, resourceID string) {
 	if e.audit == nil {
 		return
@@ -225,7 +305,7 @@ func (e *Engine) publishAudit(ctx context.Context, d Decision, agentID, actingAs
 		AgentID: agentID, ActingAs: actingAsUser, Action: action,
 		ResourceType: resourceType, ResourceID: resourceID,
 		PayloadRef: fmt.Sprintf("policy-v%d", d.PolicyVersion),
-		OccurredAt:  time.Now(),
+		OccurredAt: time.Now(),
 	})
 }
 

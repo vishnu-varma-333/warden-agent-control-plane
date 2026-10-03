@@ -56,3 +56,35 @@ func (b *Budget) Charge(ctx context.Context, scope string, amount float64) (allo
 	fmt.Sscanf(totalRaw, "%f", &total)
 	return ok == 1, total, nil
 }
+
+// Scope is one spending scope's current standing, as the console's spend
+// view lists it.
+type Scope struct {
+	Scope string  `json:"scope"`
+	Total float64 `json:"total"`
+	Limit float64 `json:"limit"`
+}
+
+// List returns every scope with a nonzero spend this period, by scanning
+// the key space Charge writes to. This is read-only — it never charges
+// anything — and is approximate under concurrent writes the way any SCAN
+// is, which is acceptable for an admin-facing summary view, not for the
+// atomic enforcement decision itself (that stays in Charge's Lua script).
+func (b *Budget) List(ctx context.Context) ([]Scope, error) {
+	var out []Scope
+	iter := b.client.Scan(ctx, 0, "warden:budget:*", 100).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		raw, err := b.client.Get(ctx, key).Result()
+		if err != nil {
+			continue // key expired between SCAN and GET; skip rather than fail the whole listing
+		}
+		var total float64
+		fmt.Sscanf(raw, "%f", &total)
+		out = append(out, Scope{Scope: key[len("warden:budget:"):], Total: total, Limit: b.limit})
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("budget: list: %w", err)
+	}
+	return out, nil
+}

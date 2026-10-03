@@ -32,6 +32,34 @@ func TestVerifyPassesOnAnUntamperedChain(t *testing.T) {
 	}
 }
 
+func TestListRecentOrdersNewestFirstAndRespectsLimit(t *testing.T) {
+	conn := testDB(t)
+	w := &ChainWriter{db: conn}
+	seedChain(t, w, 5)
+
+	records, err := ListRecent(context.Background(), conn, 3, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected 3 records (limit), got %d", len(records))
+	}
+	if records[0].Seq != 5 || records[1].Seq != 4 || records[2].Seq != 3 {
+		t.Fatalf("expected newest-first seqs 5,4,3, got %d,%d,%d", records[0].Seq, records[1].Seq, records[2].Seq)
+	}
+	if records[0].Hash == "" {
+		t.Fatal("expected ListRecent to populate each record's own hash")
+	}
+
+	older, err := ListRecent(context.Background(), conn, 10, records[2].Seq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(older) != 2 || older[0].Seq != 2 || older[1].Seq != 1 {
+		t.Fatalf("expected paging before seq 3 to return seqs 2,1, got %+v", older)
+	}
+}
+
 func TestVerifyDetectsAnEditedRecord(t *testing.T) {
 	conn := testDB(t)
 	w := &ChainWriter{db: conn}

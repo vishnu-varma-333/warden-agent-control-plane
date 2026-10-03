@@ -592,3 +592,73 @@ great numbers right up until the first real tool it looked at. "The
 held-out metrics look good" and "this works on the data it'll actually
 see in production" are different claims, and conflating them is a classic
 way ML systems look fine in testing and fail immediately in deployment.
+
+## 2026-10-03 — control-api gets a single shared admin token, not OAuth
+
+**Context:** milestone 9 (the console) is the first time control-api gets
+real write endpoints an outside party could call — approving a tool
+change, activating a policy, deciding an approval. Through milestone 8 it
+was open on the network with zero auth, which was fine while nothing on
+it could do anything; that stopped being true the moment `POST
+/policies/{version}/activate` existed.
+
+**Options considered:** (1) put control-api behind the same OAuth/OIDC
+flow (`internal/identity`) the gateway already enforces on agent traffic;
+(2) a single shared bearer token checked by one middleware
+(`internal/httpapi/adminauth.go`); (3) nothing, and treat "runs on
+localhost" as the security boundary.
+
+**Chosen: (2).** Full OAuth for a one-operator admin tool is real work
+(user accounts, roles, a login flow in the console) for a security
+property this project doesn't need yet — control-api is single-tenant,
+operator-facing, and the deployment story (milestone 10) is "one small
+VM behind a trusted boundary," not a public multi-admin SaaS. A shared
+token is a one-line middleware, closes the actual gap (an unauthenticated
+party on the network can no longer activate a policy or approve a
+poisoned tool), and is explicit about what it isn't: `adminauth.go`'s own
+doc comment says plainly that a real multi-tenant deployment needs the
+gateway's OAuth flow instead, not a two-line hack pretending to be
+finished security. Same honesty pattern as milestone 3's token-exchange
+simplification.
+
+**How it's wired:** `ADMIN_TOKEN` env var on control-api (random one
+generated and logged if unset, so a fresh `go run` never silently has no
+auth); the console holds the same value in a server-only env var and
+attaches it from Server Components/Actions, so it's never sent to the
+browser — see `console/README.md`.
+
+## 2026-10-03 — spend view shows budget consumption, not a UsageRecord ledger
+
+The spec's data model names a `UsageRecord` entity (per-call model/tokens/
+cost, written async from the telemetry stream) separately from `Budget`
+(the spending cap itself). Only `Budget` exists — `internal/budget` was
+built in milestone 3 as live Redis counters with no durable per-call
+ledger behind it, and that hasn't changed. The console's spend view
+(`GET /spend`, backed by `budget.Scope`) reads those same Redis counters
+and reports current total vs. limit per scope; it cannot show spend
+*over time* or broken down by model, because that data was never
+recorded anywhere. This is the honest scope of what's actually built, not
+a simplification invented for the console — tracked as the same
+pre-existing gap `docs/MILESTONES.md`'s spec-completeness section already
+flags under "per-team scoping for budgets."
+
+## 2026-10-03 — found via live testing: React 19 silently wiped the policy editor on a failed submit
+
+**What happened:** the "new policy version" form correctly showed the
+Cedar parser's error message on invalid input, but the textarea the admin
+had just typed into went back to empty — exactly when they need their
+draft preserved to fix and resubmit it.
+
+**Root cause:** React 19 resets *uncontrolled* form fields automatically
+once a form action finishes, success or failure — a deliberate framework
+behavior (it mirrors what a plain HTML form submit does), not a bug in
+React itself. The textarea had no `value` prop, only a `placeholder`, so
+it qualified as uncontrolled and got reset; what looked like "the
+placeholder reappeared" was actually the DOM value going back to empty
+and the placeholder showing through.
+
+**Fix:** made the textarea a controlled component (`value={source}` /
+`onChange`) backed by local `useState`, which React's own form-reset
+behavior doesn't touch. Verified live: submitting invalid Cedar now shows
+the real parser error (`internal/policy.CreateVersion`'s validation)
+*and* leaves the admin's exact input in place to edit and resubmit.

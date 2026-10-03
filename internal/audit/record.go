@@ -36,18 +36,19 @@ type Event struct {
 // the record's content" — a mismatch between write-time and verify-time
 // hashing would make every record look tampered.
 type Record struct {
-	Seq          int64
-	PrevHash     string
-	EventID      string
-	Decision     string
-	Reason       string
-	AgentID      string
-	ActingAs     string
-	Action       string
-	ResourceType string
-	ResourceID   string
-	PayloadRef   string
-	OccurredAt   time.Time
+	Seq          int64     `json:"seq"`
+	PrevHash     string    `json:"prevHash"`
+	Hash         string    `json:"hash"` // populated by readers (e.g. ListRecent); ComputeHash ignores it, it's never part of what gets hashed
+	EventID      string    `json:"eventId"`
+	Decision     string    `json:"decision"`
+	Reason       string    `json:"reason"`
+	AgentID      string    `json:"agentId"`
+	ActingAs     string    `json:"actingAs"`
+	Action       string    `json:"action"`
+	ResourceType string    `json:"resourceType"`
+	ResourceID   string    `json:"resourceId"`
+	PayloadRef   string    `json:"payloadRef"`
+	OccurredAt   time.Time `json:"occurredAt"`
 }
 
 // ComputeHash is the entire tamper-evidence mechanism: hash = SHA256(prev_hash

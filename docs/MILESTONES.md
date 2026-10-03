@@ -11,7 +11,7 @@ until the current one is done.
 - [x] **6. Durable approvals** — approval state machine, webhook notifications, expiry, kill tests.
 - [x] **7. Audit log** — hash chain, signed checkpoints, verification command.
 - [x] **8. Guard classifier** — dataset, fine-tuning, ONNX service over gRPC, benchmark vs. LLM-as-judge.
-- [ ] **9. Console** — tools, policies, approvals, audit and spend views.
+- [x] **9. Console** — tools, policies, approvals, audit and spend views.
 - [ ] **10. Ship it** — AWS deploy with Terraform, full load and fault test reports, demo video, docs site, write-up.
 - [ ] **11. Version 2** — delegation chains, just-in-time access, policy dry-run.
 
@@ -114,6 +114,55 @@ until the current one is done.
 
 **Milestone 8: done** (LLM-as-judge comparison is the one open item, blocked on the same real-provider-key gap as milestone 2 — not forgotten, not faked).
 
+## Milestone 9 progress
+
+- [x] `console/`: Next.js (App Router) + TypeScript + Tailwind admin UI,
+      as the tech stack table names. Five views, matching the spec's
+      "Web console" line exactly: tools, policies (write + version +
+      activate), approvals (approve/reject), audit (browse + verify), and
+      spend.
+- [x] control-api gained the HTTP surface the console needed — it only
+      had approvals before this milestone. New: `GET /tools`, `POST
+      /tools/{server}/{name}/approve`, `GET /policies`, `POST
+      /policies` (validates Cedar before inserting), `POST
+      /policies/{version}/activate`, `GET /audit` (paginated browsing),
+      `POST /audit/verify` (same check `wardenctl` runs), `GET /spend`.
+      Backed by new methods on the existing packages
+      (`registry.List`, `policy.ListVersions/CreateVersion/Activate`,
+      `audit.ListRecent`, `budget.List`), each with its own unit test
+      against the same real Postgres/Redis the rest of the suite uses.
+- [x] control-api is no longer unauthenticated: a single shared
+      `ADMIN_TOKEN` bearer check (`internal/httpapi/adminauth.go`), a
+      deliberate v1 simplification rather than full OAuth — see
+      DECISIONS.md. The console holds the token server-side only
+      (Server Components/Actions), never in client JavaScript.
+- [x] Every mutation (approve a tool, create/activate a policy, decide an
+      approval) is a Next.js Server Action, so the admin token never
+      reaches the browser and the console never needs its own API proxy
+      layer.
+- [x] Verified live against the real running stack, not just a mocked
+      API: approved a poisoned tool definition, created and activated a
+      new Cedar policy version (including a rejected invalid-syntax
+      submission), approved and rejected real approval rows, ran a live
+      chain verification from the UI, and viewed real budget consumption
+      with the near-limit warning state. Also exercised a real
+      control-api outage (killed the process, confirmed a clean error
+      state, restarted, confirmed recovery) rather than only the happy
+      path.
+- [x] Found and fixed a real bug during that verification: React 19
+      resets uncontrolled form fields after any form action completes,
+      including a failed one — the new-policy textarea was silently
+      wiped the moment Cedar validation rejected it. Fixed by making it a
+      controlled component. Detailed in DECISIONS.md.
+- [ ] Spend view reports current budget consumption per scope, not a
+      historical UsageRecord ledger (spend over time, broken down by
+      model) — that entity was never built (see the per-team-scoping gap
+      already tracked below); this isn't a new gap, just where it became
+      visible.
+
+**Milestone 9: done** (the one open item is a pre-existing gap from
+milestone 3's budget design, not new scope this milestone skipped).
+
 ## Spec completeness check (2026-10-03, after milestone 4)
 
 Per-milestone tracking above is necessarily scoped to that milestone's own
@@ -153,3 +202,32 @@ core v1 features' milestones so far (1-4) match what the spec actually
 asked for them to do, including the harder-to-spot details (short-lived
 tokens, exact-match-not-fuzzy caching, "every call carries both
 identities," etc.).
+
+## Spec completeness check (2026-10-03, after milestone 9)
+
+Re-checked against the full spec now that the console exists. The
+"Console" line itself (tools/policies/approvals/audit/spend) is fully
+built — see milestone 9 progress above. The four gaps found after
+milestone 4 are unchanged and still open, all still tracked for the same
+milestone 10 pass: metrics/dashboards, per-team scoping for budgets
+(still no Team entity — the console's spend view lists whatever scope
+strings have been charged, which today means agent IDs, not teams),
+fault/kill/security test suites, and the runbook. No new gaps found
+against the console's own spec line, and no gap from milestone 4's check
+got resolved as a side effect of building it — the console is a UI over
+what already existed, not new backend capability beyond the HTTP
+endpoints it needed (tools/policies/audit CRUD, which were real gaps in
+control-api's surface, now closed).
+
+Two things worth being explicit about since they're easy to gloss over
+in a UI-focused milestone: (1) `wardenctl`'s broader command surface
+(`policy validate/diff/apply`) is still just `audit verify` — the spec's
+own milestone list said this waits for the console to exist, which it
+now does, so this becomes a real follow-up rather than a forward
+reference to something hypothetical. (2) the console itself has no
+per-admin login (see DECISIONS.md's admin-token entry) — acceptable for
+v1's single-operator scope, but a real gap if this console is ever
+exposed beyond a trusted operator's machine, which milestone 10's hosted
+demo needs to account for (a read-only demo login, per the spec's "For
+recruiters" section, is a different, narrower thing than real console
+auth and shouldn't be conflated with it).

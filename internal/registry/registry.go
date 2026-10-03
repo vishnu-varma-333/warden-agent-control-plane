@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 const (
@@ -88,6 +89,43 @@ func (r *Registry) Status(ctx context.Context, server, name string) (status stri
 		return "", false, fmt.Errorf("registry: status: %w", err)
 	}
 	return status, true, nil
+}
+
+// ToolRecord is one row of the registry, as the console lists it.
+type ToolRecord struct {
+	MCPServer      string    `json:"mcpServer"`
+	Name           string    `json:"name"`
+	DefinitionHash string    `json:"definitionHash"`
+	PendingHash    *string   `json:"pendingHash,omitempty"`
+	Status         string    `json:"status"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// List returns every tool the registry has ever pinned, most recently
+// updated first — what the console's tools view shows an admin.
+func (r *Registry) List(ctx context.Context) ([]ToolRecord, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT mcp_server, name, definition_hash, pending_hash, status, updated_at
+		 FROM tools ORDER BY updated_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("registry: list: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ToolRecord
+	for rows.Next() {
+		var t ToolRecord
+		var pendingHash sql.NullString
+		if err := rows.Scan(&t.MCPServer, &t.Name, &t.DefinitionHash, &pendingHash, &t.Status, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("registry: list scan: %w", err)
+		}
+		if pendingHash.Valid {
+			t.PendingHash = &pendingHash.String
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // Approve promotes a changed tool's pending hash to the trusted one and

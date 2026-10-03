@@ -66,3 +66,34 @@ func TestRejectedChargeIsNotApplied(t *testing.T) {
 		t.Fatalf("expected the rejected charge to have left room for +1 (total 10), got allowed=%v total=%v", allowed, total)
 	}
 }
+
+func TestListReturnsEveryChargedScope(t *testing.T) {
+	client := newTestClient(t)
+	b := New(client, 10.0, time.Minute)
+	ctx := context.Background()
+
+	if _, _, err := b.Charge(ctx, "team-a", 3.0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, _, err := b.Charge(ctx, "team-b", 7.0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	scopes, err := b.List(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(scopes) != 2 {
+		t.Fatalf("expected 2 scopes, got %d: %+v", len(scopes), scopes)
+	}
+	totals := map[string]float64{}
+	for _, s := range scopes {
+		if s.Limit != 10.0 {
+			t.Fatalf("expected limit 10.0 on every scope, got %v for %q", s.Limit, s.Scope)
+		}
+		totals[s.Scope] = s.Total
+	}
+	if totals["team-a"] != 3.0 || totals["team-b"] != 7.0 {
+		t.Fatalf("unexpected totals: %+v", totals)
+	}
+}

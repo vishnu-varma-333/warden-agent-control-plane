@@ -6,6 +6,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,10 +17,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -82,17 +89,66 @@ func main() {
 	approvalManager := approval.New(pgConn, notifier, auditProducer)
 	approvalManager.StartExpirySweep(ctx, 10*time.Second)
 
+	redisAddr := envOr("REDIS_ADDR", "localhost:6379")
+	redisClient := redis.NewClient(&redis.Options{Addr: redisAddr})
+
+	toolRegistry := registry.New(pgConn)
+	// auditProducer is passed nil here: control-api only reads/writes
+	// policy rows directly (ListVersions/CreateVersion/Activate), it never
+	// calls Authorize, so there's no decision to publish.
+	policyEngine := policy.New(pgConn, redisClient, nil)
+	// Must match the gateway's own budget.New call (cmd/gateway/main.go) —
+	// same Redis keys, same limit/period, so the console reports the spend
+	// the gateway is actually enforcing rather than a second, divergent
+	// notion of it. No per-scope config exists yet (see docs/MILESTONES.md
+	// spec-completeness tracking on per-team budgets), so this is the one
+	// hardcoded value shared by both processes.
+	budgetEnforcer := budget.New(redisClient, 100, time.Hour)
+
+	var auditPubKey ed25519.PublicKey
+	if pubHex := os.Getenv("WARDEN_AUDIT_PUBLIC_KEY"); pubHex != "" {
+		if pubBytes, err := hex.DecodeString(pubHex); err == nil && len(pubBytes) == ed25519.PublicKeySize {
+			auditPubKey = ed25519.PublicKey(pubBytes)
+		} else {
+			slog.Error("invalid WARDEN_AUDIT_PUBLIC_KEY, checkpoint fast-path verification disabled")
+		}
+	}
+
+	adminToken := os.Getenv("ADMIN_TOKEN")
+	if adminToken == "" {
+		buf := make([]byte, 16)
+		if _, err := rand.Read(buf); err != nil {
+			slog.Error("generate admin token failed", "error", err)
+			os.Exit(1)
+		}
+		adminToken = hex.EncodeToString(buf)
+		slog.Warn("ADMIN_TOKEN not set — generated a random one for this process only; the console needs this exact value",
+			"adminToken", adminToken)
+	}
+
 	approvalsHandler := &httpapi.ApprovalsHandler{Manager: approvalManager}
+	toolsHandler := &httpapi.ToolsHandler{Registry: toolRegistry}
+	policiesHandler := &httpapi.PoliciesHandler{Engine: policyEngine}
+	auditHandler := &httpapi.AuditHandler{DB: pgConn, AuditPubKey: auditPubKey}
+	spendHandler := &httpapi.SpendHandler{Budget: budgetEnforcer}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("POST /approvals/{id}/decide", approvalsHandler.Decide)
 	mux.HandleFunc("GET /approvals/{id}", approvalsHandler.Get)
 	mux.HandleFunc("GET /approvals", approvalsHandler.List)
+	mux.HandleFunc("GET /tools", toolsHandler.List)
+	mux.HandleFunc("POST /tools/{server}/{name}/approve", toolsHandler.Approve)
+	mux.HandleFunc("GET /policies", policiesHandler.List)
+	mux.HandleFunc("POST /policies", policiesHandler.Create)
+	mux.HandleFunc("POST /policies/{version}/activate", policiesHandler.Activate)
+	mux.HandleFunc("GET /audit", auditHandler.List)
+	mux.HandleFunc("POST /audit/verify", auditHandler.Verify)
+	mux.HandleFunc("GET /spend", spendHandler.List)
 
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      otelhttp.NewHandler(mux, "control-api"),
+		Handler:      otelhttp.NewHandler(httpapi.RequireAdminToken(adminToken, mux), "control-api"),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,

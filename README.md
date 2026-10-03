@@ -43,10 +43,17 @@ Run the gateway:
 go run ./cmd/gateway
 ```
 
-Run the control API:
+Run the control API (prints a random `ADMIN_TOKEN` on first boot if you
+don't set one — the console needs this exact value):
 
 ```bash
 go run ./cmd/control-api
+```
+
+Run the console (see `console/README.md` for first-time setup):
+
+```bash
+cd console && npm run dev
 ```
 
 Run the guard classifier (see `services/guard-classifier/README.md` for first-time setup — venv, training, ONNX export):

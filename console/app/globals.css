@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --foreground: #0f172a;
+  --muted: #64748b;
+  --accent: #4f46e5;
+  --accent-foreground: #ffffff;
+  --sidebar: #0f172a;
+  --sidebar-foreground: #cbd5e1;
+  --sidebar-foreground-active: #ffffff;
+  --sidebar-border: #1e293b;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-foreground-active: var(--sidebar-foreground-active);
+  --color-sidebar-border: var(--sidebar-border);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Tabular figures for columns of numbers (hashes, counts, timestamps) so
+   rows align the way a real admin tool's tables do. */
+.tabular {
+  font-feature-settings: "tnum";
+}

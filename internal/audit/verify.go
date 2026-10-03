@@ -10,12 +10,12 @@ import (
 )
 
 type VerifyResult struct {
-	OK              bool
-	RecordsVerified int64
-	StartSeq        int64 // first seq actually checked (1 for full verification)
-	FailureAt       int64 // seq where a mismatch was found; 0 if OK
-	FailureReason   string
-	Duration        time.Duration
+	OK              bool          `json:"ok"`
+	RecordsVerified int64         `json:"recordsVerified"`
+	StartSeq        int64         `json:"startSeq"`  // first seq actually checked (1 for full verification)
+	FailureAt       int64         `json:"failureAt"` // seq where a mismatch was found; 0 if OK
+	FailureReason   string        `json:"failureReason"`
+	Duration        time.Duration `json:"durationNanos"`
 }
 
 // Verify walks the chain from (fromSeq+1) onward, trusting fromHash as the
@@ -133,4 +133,40 @@ func VerifyFromLatestCheckpoint(ctx context.Context, db *sql.DB, public ed25519.
 	}
 
 	return Verify(ctx, db, seq, hash)
+}
+
+// ListRecent returns up to limit audit events, most recent seq first —
+// what the console's audit view browses. This is read-only browsing, not
+// verification: it doesn't recompute or check any hash, it just shows what
+// was recorded. beforeSeq, when non-zero, pages backward from that seq
+// (exclusive) for "load older" style pagination.
+func ListRecent(ctx context.Context, db *sql.DB, limit int, beforeSeq int64) ([]Record, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	query := `SELECT seq, prev_hash, hash, event_id, decision, reason, agent_id, acting_as, action, resource_type, resource_id, payload_ref, occurred_at
+	          FROM audit_events`
+	args := []any{}
+	if beforeSeq > 0 {
+		query += ` WHERE seq < $1`
+		args = append(args, beforeSeq)
+	}
+	query += fmt.Sprintf(` ORDER BY seq DESC LIMIT %d`, limit)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list recent: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Record
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(&rec.Seq, &rec.PrevHash, &rec.Hash, &rec.EventID, &rec.Decision, &rec.Reason,
+			&rec.AgentID, &rec.ActingAs, &rec.Action, &rec.ResourceType, &rec.ResourceID, &rec.PayloadRef, &rec.OccurredAt); err != nil {
+			return nil, fmt.Errorf("audit: list recent scan: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }

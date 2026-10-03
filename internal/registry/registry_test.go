@@ -105,6 +105,33 @@ func TestChangedHashBlocksAndApproveClears(t *testing.T) {
 	}
 }
 
+func TestListIncludesReconciledTools(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	server := uniqueServer(t)
+
+	if _, err := r.Reconcile(ctx, server, "echo", "hash-a"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tools, err := r.List(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var found bool
+	for _, tl := range tools {
+		if tl.MCPServer == server && tl.Name == "echo" {
+			found = true
+			if tl.DefinitionHash != "hash-a" || tl.Status != StatusActive {
+				t.Fatalf("unexpected tool record: %+v", tl)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected List to include the just-reconciled tool")
+	}
+}
+
 func TestStatusUnknownTool(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	_, ok, err := r.Status(context.Background(), uniqueServer(t), "nonexistent")
