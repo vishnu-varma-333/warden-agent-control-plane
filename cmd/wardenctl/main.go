@@ -1,8 +1,8 @@
-// Command wardenctl is the operator CLI. v1 implements the audit-log
-// verification command the spec calls for; policy validate/diff/apply
-// (also named in the spec as wardenctl's job) are tracked as follow-up
-// work once the console exists to drive them against, not silently
-// dropped — see docs/MILESTONES.md.
+// Command wardenctl is the operator CLI: audit-log verification, and
+// "policies as code" (validate/diff/apply a Cedar file against the
+// control-api, the way a CI pipeline driving policy changes from a Git
+// repo would — see the spec's "How users access it" section). Dry-run is
+// explicitly a v2 feature there, not implemented here.
 package main
 
 import (
@@ -24,6 +24,8 @@ func main() {
 	switch os.Args[1] {
 	case "audit":
 		runAudit(os.Args[2:])
+	case "policy":
+		runPolicy(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -32,13 +34,20 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `wardenctl audit verify [--from-checkpoint]
+wardenctl policy validate <file.cedar>
+wardenctl policy diff <file.cedar>
+wardenctl policy apply <file.cedar> [--activate]
 
   --from-checkpoint   verify from the latest signed checkpoint forward
                        instead of from genesis (requires WARDEN_AUDIT_PUBLIC_KEY)
+  --activate          also activate the version apply just created, instead
+                       of leaving it inactive for a separate review step
 
 Environment:
   DATABASE_URL             Postgres DSN (default: postgres://warden:warden@localhost:5432/warden?sslmode=disable)
-  WARDEN_AUDIT_PUBLIC_KEY  hex-encoded Ed25519 public key, required for --from-checkpoint`)
+  WARDEN_AUDIT_PUBLIC_KEY  hex-encoded Ed25519 public key, required for --from-checkpoint
+  CONTROL_API_URL          control-api base URL (default: http://localhost:8081), used by policy subcommands
+  ADMIN_TOKEN              control-api's admin bearer token, required by policy subcommands`)
 }
 
 func runAudit(args []string) {
