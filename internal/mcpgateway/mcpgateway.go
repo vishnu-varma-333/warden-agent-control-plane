@@ -19,9 +19,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/guard"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
 )
 
@@ -31,30 +33,34 @@ type UpstreamConfig struct {
 }
 
 type Gateway struct {
-	registry *registry.Registry
-	policy   *policy.Engine
-	approval *approval.Manager // nil means no approval gating is configured
-	guard    *guard.Client     // nil means no injection scanning is configured
-	verifier *identity.Verifier
-	outward  *mcp.Server
-	impl     *mcp.Implementation
+	registry  *registry.Registry
+	policy    *policy.Engine
+	approval  *approval.Manager  // nil means no approval gating is configured
+	guard     *guard.Client      // nil means no injection scanning is configured
+	rateLimit *ratelimit.Limiter // nil means no rate limiting on tool calls
+	budget    *budget.Budget     // nil means no budget enforcement on tool calls
+	verifier  *identity.Verifier
+	outward   *mcp.Server
+	impl      *mcp.Implementation
 
 	mu       sync.Mutex
 	sessions map[string]*mcp.ClientSession
 	configs  map[string]UpstreamConfig
 }
 
-func New(reg *registry.Registry, pol *policy.Engine, appr *approval.Manager, grd *guard.Client, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
+func New(reg *registry.Registry, pol *policy.Engine, appr *approval.Manager, grd *guard.Client, rl *ratelimit.Limiter, bg *budget.Budget, verifier *identity.Verifier, impl *mcp.Implementation) *Gateway {
 	return &Gateway{
-		registry: reg,
-		policy:   pol,
-		approval: appr,
-		guard:    grd,
-		verifier: verifier,
-		outward:  mcp.NewServer(impl, nil),
-		impl:     impl,
-		sessions: make(map[string]*mcp.ClientSession),
-		configs:  make(map[string]UpstreamConfig),
+		registry:  reg,
+		policy:    pol,
+		approval:  appr,
+		guard:     grd,
+		rateLimit: rl,
+		budget:    bg,
+		verifier:  verifier,
+		outward:   mcp.NewServer(impl, nil),
+		impl:      impl,
+		sessions:  make(map[string]*mcp.ClientSession),
+		configs:   make(map[string]UpstreamConfig),
 	}
 }
 
@@ -212,6 +218,34 @@ func (g *Gateway) proxyHandler(upstreamName string) mcp.ToolHandler {
 		}
 		if !decision.Allow {
 			return nil, fmt.Errorf("mcpgateway: denied by policy (version %d): %v", decision.PolicyVersion, decision.Reasons)
+		}
+
+		// Same per-agent + per-team scoping as the model-call path
+		// (internal/httpapi.ChatHandler) — tool calls are requests too,
+		// and the spec's "per-team and per-agent request rates" doesn't
+		// carve out an exception for MCP traffic. Both nil-checked: a
+		// gateway can run with model-call-only limiting configured.
+		if g.rateLimit != nil || g.budget != nil {
+			scopes := []string{principal.AgentID}
+			if principal.Team != "" {
+				scopes = append(scopes, "team:"+principal.Team)
+			}
+			for _, scope := range scopes {
+				if g.rateLimit != nil {
+					if allowed, err := g.rateLimit.Allow(ctx, scope); err != nil {
+						slog.Error("mcpgateway: rate limit check failed, allowing request", "scope", scope, "error", err)
+					} else if !allowed {
+						return nil, fmt.Errorf("mcpgateway: rate limit exceeded for %s", scope)
+					}
+				}
+				if g.budget != nil {
+					if allowed, total, err := g.budget.Charge(ctx, scope, 1.0); err != nil {
+						slog.Error("mcpgateway: budget check failed, allowing request", "scope", scope, "error", err)
+					} else if !allowed {
+						return nil, fmt.Errorf("mcpgateway: budget exceeded for %s (at %v)", scope, total)
+					}
+				}
+			}
 		}
 
 		if g.approval != nil {

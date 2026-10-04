@@ -191,7 +191,7 @@ func main() {
 	}
 	defer guardClient.Close()
 
-	mcpGW := mcpgateway.New(toolRegistry, policyEngine, approvalManager, guardClient, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
+	mcpGW := mcpgateway.New(toolRegistry, policyEngine, approvalManager, guardClient, limiter, budgetEnforcer, verifier, &mcp.Implementation{Name: "warden", Version: "v1"})
 
 	demoMCPAddr := os.Getenv("DEMO_MCP_URL")
 	if demoMCPAddr == "" {

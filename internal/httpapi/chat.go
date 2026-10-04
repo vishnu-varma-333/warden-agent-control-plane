@@ -117,18 +117,33 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if allowed, err := h.RateLimit.Allow(r.Context(), principal.AgentID); err != nil {
-		slog.Error("rate limit check failed, allowing request", "agent", principal.AgentID, "error", err)
-	} else if !allowed {
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-		return
+	// Per-agent AND (if the agent's client carries a "team" claim)
+	// per-team — both must pass, not either/or: a team hitting its
+	// shared cap should stop every agent in it, even one that's nowhere
+	// near its own individual limit. See DECISIONS.md on why this is a
+	// claim-driven scope rather than a new Team entity/table — the spec's
+	// own data model never lists one; "team" is just another budget/
+	// rate-limit scope string, same mechanism as "agent," not a new kind
+	// of thing.
+	scopes := []string{principal.AgentID}
+	if principal.Team != "" {
+		scopes = append(scopes, "team:"+principal.Team)
 	}
-
-	if allowed, total, err := h.Budget.Charge(r.Context(), principal.AgentID, costPerCall); err != nil {
-		slog.Error("budget check failed, allowing request", "agent", principal.AgentID, "error", err)
-	} else if !allowed {
-		http.Error(w, fmt.Sprintf("budget exceeded (at %v)", total), http.StatusPaymentRequired)
-		return
+	for _, scope := range scopes {
+		if allowed, err := h.RateLimit.Allow(r.Context(), scope); err != nil {
+			slog.Error("rate limit check failed, allowing request", "scope", scope, "error", err)
+		} else if !allowed {
+			http.Error(w, fmt.Sprintf("rate limit exceeded for %s", scope), http.StatusTooManyRequests)
+			return
+		}
+	}
+	for _, scope := range scopes {
+		if allowed, total, err := h.Budget.Charge(r.Context(), scope, costPerCall); err != nil {
+			slog.Error("budget check failed, allowing request", "scope", scope, "error", err)
+		} else if !allowed {
+			http.Error(w, fmt.Sprintf("budget exceeded for %s (at %v)", scope, total), http.StatusPaymentRequired)
+			return
+		}
 	}
 
 	providerReq := provider.ChatRequest{Model: req.Model, Messages: req.Messages}

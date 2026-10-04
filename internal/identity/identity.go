@@ -89,5 +89,11 @@ func (v *Verifier) Verify(tokenString string) (Principal, error) {
 		return Principal{}, fmt.Errorf("identity: token was never exchanged for a user (got the agent's own service-account identity) — fetch a token via RFC 8693 token exchange first, see deploy/bench/get_token.sh")
 	}
 
-	return Principal{AgentID: agentID, ActingAs: actingAs}, nil
+	// Optional: a client without a "team" claim just doesn't get
+	// team-scoped budget/rate-limit enforcement — see
+	// internal/httpapi.ChatHandler, which only charges a team scope when
+	// this is non-empty.
+	team, _ := claims["team"].(string)
+
+	return Principal{AgentID: agentID, ActingAs: actingAs, Team: team}, nil
 }

@@ -8,10 +8,14 @@ import (
 )
 
 // Principal is the resolved "who" for a request: the agent that
-// authenticated, and the user it's acting on behalf of for this call.
+// authenticated, the user it's acting on behalf of for this call, and
+// the team the agent belongs to (empty if the agent's client carries no
+// "team" claim — budgets/rate limits then apply per-agent only, same as
+// before team scoping existed).
 type Principal struct {
 	AgentID  string
 	ActingAs string
+	Team     string
 }
 
 type principalKey struct{}
