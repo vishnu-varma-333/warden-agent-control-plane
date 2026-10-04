@@ -196,12 +196,34 @@ func waitHealthy(url string) error {
 	return fmt.Errorf("gateway never became healthy at %s", url)
 }
 
+// fetchToken returns a token already exchanged (RFC 8693) for user-1 —
+// what every caller presents now, not a plain client-credentials token.
+// See deploy/bench/get_token.sh (same two-step flow) and
+// internal/identity's doc comments for why.
 func fetchToken(url string) (string, error) {
-	resp, err := http.PostForm(url, map[string][]string{
+	subject, err := tokenRequest(url, map[string][]string{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {"agent-demo"},
 		"client_secret": {"agent-demo-secret"},
 	})
+	if err != nil {
+		return "", fmt.Errorf("client-credentials token: %w", err)
+	}
+	exchanged, err := tokenRequest(url, map[string][]string{
+		"grant_type":        {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"client_id":         {"agent-demo"},
+		"client_secret":     {"agent-demo-secret"},
+		"subject_token":     {subject},
+		"requested_subject": {"user-1"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("token exchange (did you run deploy/docker/setup_token_exchange.sh?): %w", err)
+	}
+	return exchanged, nil
+}
+
+func tokenRequest(url string, form map[string][]string) (string, error) {
+	resp, err := http.PostForm(url, form)
 	if err != nil {
 		return "", err
 	}
@@ -211,6 +233,9 @@ func fetchToken(url string) (string, error) {
 	}
 	if err := jsonDecode(resp.Body, &body); err != nil {
 		return "", err
+	}
+	if body.AccessToken == "" {
+		return "", fmt.Errorf("no access_token in response")
 	}
 	return body.AccessToken, nil
 }

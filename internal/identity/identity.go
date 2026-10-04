@@ -6,18 +6,10 @@ package identity
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 )
-
-// Identity is what the token itself proves: which agent it belongs to, and
-// which users that agent is allowed to act on behalf of.
-type Identity struct {
-	AgentID         string
-	ActingAsAllowed []string
-}
 
 type Verifier struct {
 	keyfunc keyfunc.Keyfunc
@@ -35,45 +27,67 @@ func NewVerifier(ctx context.Context, issuer string) (*Verifier, error) {
 	return &Verifier{keyfunc: kf, issuer: issuer}, nil
 }
 
-// Verify checks the token's signature, expiry and issuer, then extracts the
-// agent identity and its "acting as" allowlist.
+// Verify checks the token's signature, expiry and issuer, then extracts
+// both identities the token itself proves: "azp" (the OIDC-standard
+// "authorized party" claim) is the agent — the client that originally
+// authenticated, and stays the exchanging client's ID even after a real
+// RFC 8693 token exchange, which is exactly the property this needs.
+// "sub"/"preferred_username" is the acting-as user.
 //
-// Simplification, recorded in DECISIONS.md: a full OAuth token-exchange flow
-// (RFC 8693) would let an agent request a token scoped to one specific user
-// per call. Instead, the agent's own client-credentials token carries a
-// fixed allowlist of users it may act for (via a Keycloak protocol mapper),
-// and the caller names which one for this call via a header. Good enough to
-// prove the "two identities per call" requirement without standing up
-// token exchange, which Keycloak makes considerably more involved to set up.
-func (v *Verifier) Verify(tokenString string) (Identity, error) {
+// This is deliberately NOT "verify the agent, then trust a caller-
+// supplied header naming who it acts for" — that was last year's
+// simplification (see DECISIONS.md for the full history). A real token
+// exchange already happened before this token ever reached Warden (see
+// deploy/bench/get_token.sh): the agent asked Keycloak to exchange its
+// own client-credentials token for one scoped to a specific user, and
+// Keycloak checked ITS OWN impersonation permission/policy
+// (deploy/docker/keycloak-realm.json's "agent-demo-can-impersonate"
+// client policy) before agreeing. By the time this function runs, "is
+// this agent allowed to act as this user" has already been answered, by
+// Keycloak, not by Warden re-checking a claim the agent could otherwise
+// have asserted about itself.
+func (v *Verifier) Verify(tokenString string) (Principal, error) {
 	token, err := jwt.Parse(tokenString, v.keyfunc.Keyfunc,
 		jwt.WithIssuer(v.issuer),
 		jwt.WithValidMethods([]string{"RS256"}),
 	)
 	if err != nil {
-		return Identity{}, fmt.Errorf("identity: invalid token: %w", err)
+		return Principal{}, fmt.Errorf("identity: invalid token: %w", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return Identity{}, fmt.Errorf("identity: unexpected claims shape")
+		return Principal{}, fmt.Errorf("identity: unexpected claims shape")
 	}
 
-	// "azp" (authorized party) is the OIDC-standard claim for which client a
-	// client-credentials token was issued to.
 	agentID, _ := claims["azp"].(string)
 	if agentID == "" {
-		return Identity{}, fmt.Errorf("identity: token has no azp (client) claim")
+		return Principal{}, fmt.Errorf("identity: token has no azp (client) claim")
 	}
 
-	var allowed []string
-	if raw, ok := claims["acting_as_allowed"].(string); ok {
-		for _, s := range strings.Split(raw, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				allowed = append(allowed, s)
-			}
-		}
+	// preferred_username over raw "sub" (a UUID): everywhere else in
+	// Warden (policy, approvals, the console) a human user is named by
+	// its readable username ("user-1"), not its Keycloak-internal ID —
+	// changing that now would mean every Cedar policy, approval row and
+	// console view would need to switch to matching on UUIDs instead.
+	actingAs, _ := claims["preferred_username"].(string)
+	if actingAs == "" {
+		return Principal{}, fmt.Errorf("identity: token has no preferred_username claim — was it actually exchanged for a user, not just a plain client-credentials token?")
 	}
 
-	return Identity{AgentID: agentID, ActingAsAllowed: allowed}, nil
+	// Found live wiring this up: a PLAIN, never-exchanged client-credentials
+	// token also carries a preferred_username — Keycloak gives every
+	// service-account client its own hidden user, always named
+	// "service-account-<clientId>" by Keycloak's own fixed, documented
+	// convention, and that counts as a perfectly valid preferred_username
+	// claim. Without this check, a plain token (which should be rejected —
+	// it was never exchanged for anyone, so no impersonation permission
+	// was ever checked) would silently be accepted as "acting as the
+	// service account's own user," defeating the entire point of
+	// requiring a real exchange.
+	if actingAs == "service-account-"+agentID {
+		return Principal{}, fmt.Errorf("identity: token was never exchanged for a user (got the agent's own service-account identity) — fetch a token via RFC 8693 token exchange first, see deploy/bench/get_token.sh")
+	}
+
+	return Principal{AgentID: agentID, ActingAs: actingAs}, nil
 }

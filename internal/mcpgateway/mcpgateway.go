@@ -193,8 +193,10 @@ func (g *Gateway) proxyHandler(upstreamName string) mcp.ToolHandler {
 
 		// Identity is resolved per call, not once per connection: a single
 		// MCP session can carry many tools/call requests, and each one
-		// brings its own Authorization/X-Acting-As headers (RequestExtra),
-		// which may differ between calls.
+		// brings its own Authorization header (RequestExtra) — a token
+		// already exchanged (RFC 8693) for whichever user that specific
+		// call acts as, which may differ between calls in the same
+		// session.
 		var header http.Header
 		if extra := req.GetExtra(); extra != nil {
 			header = extra.Header

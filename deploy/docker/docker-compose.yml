@@ -70,7 +70,7 @@ services:
 
   keycloak:
     image: quay.io/keycloak/keycloak:25.0
-    command: ["start-dev", "--import-realm"]
+    command: ["start-dev", "--import-realm", "--features=token-exchange,admin-fine-grained-authz"]
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -101,7 +101,14 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9090:9090"
+      # Host 9091, not Prometheus's usual 9090 — cmd/demo-mcp-server
+      # already owns :9090 on the host by long-standing convention (see
+      # DEMO_MCP_URL throughout docs/scripts). Found live: starting both
+      # meant demo-mcp-server's bind failed silently and the gateway's
+      # "mcp upstream connect" talked to Prometheus's own web UI instead,
+      # getting a confusing "Method Not Allowed" rather than an obvious
+      # port-in-use error.
+      - "9091:9090"
 
   grafana:
     image: grafana/grafana:11.3.1

@@ -35,10 +35,8 @@ echo "==> creating proxies"
 toxiproxy-cli create -l 127.0.0.1:16379 -u 127.0.0.1:6379 redis_proxy 2>/dev/null || true
 toxiproxy-cli create -l 127.0.0.1:15432 -u 127.0.0.1:5432 postgres_proxy 2>/dev/null || true
 
-echo "==> fetching a real agent token from Keycloak"
-TOKEN=$(curl -s -X POST "http://localhost:8180/realms/warden/protocol/openid-connect/token" \
-  -d "grant_type=client_credentials" -d "client_id=agent-demo" -d "client_secret=agent-demo-secret" \
-  | python3 -c "import json,sys;print(json.load(sys.stdin)['access_token'])")
+echo "==> fetching a real, already-exchanged (RFC 8693) agent token from Keycloak"
+TOKEN=$("$REPO_ROOT/deploy/bench/get_token.sh" user-1)
 
 call_gateway() {
   curl -s -o /tmp/fault-resp.json -w "%{http_code}" -X POST "localhost:${FAULT_PORT}/v1/chat/completions" \

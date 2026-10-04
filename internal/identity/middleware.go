@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 )
 
@@ -22,48 +21,51 @@ func FromContext(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
-// ResolveFromHeader does the same Bearer-token + X-Acting-As resolution
-// Middleware does, as a standalone function. It exists because the MCP
-// proxy handler needs identity resolved per tool call (using headers the
-// SDK hands it via RequestExtra), not just once when the HTTP connection to
-// /mcp opened — a single MCP session can carry many tool calls, potentially
-// claiming different acting-as users across calls.
+// ResolveFromHeader does the same Bearer-token resolution Middleware does,
+// as a standalone function. It exists because the MCP proxy handler needs
+// identity resolved per tool call (using headers the SDK hands it via
+// RequestExtra), not just once when the HTTP connection to /mcp opened —
+// a single MCP session can carry many tool calls, potentially acting as
+// different users (each with its own already-exchanged token) across
+// calls.
+//
+// X-Acting-As is optional now (it used to be required — see
+// identity.go's doc comment on Verify for why): the token itself already
+// proves who it's acting as, Keycloak-verified at exchange time. If a
+// caller sends it anyway, it's checked as a consistency guard — catching
+// "the caller attached the wrong token for this call" — not trusted as
+// the source of truth.
 func ResolveFromHeader(v *Verifier, h http.Header) (Principal, error) {
 	tokenString, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	if !ok || tokenString == "" {
 		return Principal{}, fmt.Errorf("missing Authorization: Bearer <token>")
 	}
 
-	id, err := v.Verify(tokenString)
+	p, err := v.Verify(tokenString)
 	if err != nil {
 		return Principal{}, fmt.Errorf("invalid token: %w", err)
 	}
 
-	actingAs := h.Get("X-Acting-As")
-	if actingAs == "" {
-		return Principal{}, fmt.Errorf("missing X-Acting-As header")
-	}
-	if !slices.Contains(id.ActingAsAllowed, actingAs) {
-		return Principal{}, fmt.Errorf("agent %q may not act as %q", id.AgentID, actingAs)
+	if hdr := h.Get("X-Acting-As"); hdr != "" && hdr != p.ActingAs {
+		return Principal{}, fmt.Errorf("X-Acting-As header (%q) does not match the token's actual subject (%q) — wrong exchanged token attached to this call?", hdr, p.ActingAs)
 	}
 
-	return Principal{AgentID: id.AgentID, ActingAs: actingAs}, nil
+	return p, nil
 }
 
-// Middleware requires a Bearer token (verified against Keycloak) and an
-// X-Acting-As header naming a user the token's agent is allowed to act for.
-// Every downstream handler can then trust that both identities are real and
-// authorized, without re-checking anything itself.
+// Middleware requires a Bearer token, verified against Keycloak, that has
+// already been exchanged (RFC 8693) for the specific user it's acting as
+// — see identity.go's Verify. Every downstream handler can then trust
+// both identities are real and authorized, without re-checking anything
+// itself.
 func Middleware(v *Verifier) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, err := ResolveFromHeader(v, r.Header)
 			if err != nil {
 				status := http.StatusUnauthorized
-				if strings.Contains(err.Error(), "X-Acting-As") {
+				if strings.Contains(err.Error(), "does not match") {
 					status = http.StatusBadRequest
-				} else if strings.Contains(err.Error(), "may not act as") {
-					status = http.StatusForbidden
 				}
 				http.Error(w, err.Error(), status)
 				return
