@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +66,7 @@ func TestVerifyDetectsAnEditedRecord(t *testing.T) {
 	w := &ChainWriter{db: conn}
 	seedChain(t, w, 5)
 	ctx := context.Background()
+	bypassImmutabilityTrigger(t, conn)
 
 	// Tamper directly, bypassing the application entirely - simulating
 	// someone with raw database access editing history, which is exactly
@@ -93,6 +95,7 @@ func TestVerifyDetectsADeletedRecord(t *testing.T) {
 	w := &ChainWriter{db: conn}
 	seedChain(t, w, 5)
 	ctx := context.Background()
+	bypassImmutabilityTrigger(t, conn)
 
 	if _, err := conn.ExecContext(ctx, `DELETE FROM audit_events WHERE seq = 3`); err != nil {
 		t.Fatalf("tamper setup failed: %v", err)
@@ -115,6 +118,7 @@ func TestVerifyDetectsReorderedRecords(t *testing.T) {
 	w := &ChainWriter{db: conn}
 	seedChain(t, w, 5)
 	ctx := context.Background()
+	bypassImmutabilityTrigger(t, conn)
 
 	// Swap the (prev_hash, hash) of records 2 and 3 to simulate reordering
 	// while keeping seq numbers contiguous (the harder case to catch than
@@ -134,5 +138,43 @@ func TestVerifyDetectsReorderedRecords(t *testing.T) {
 	}
 	if result.FailureAt != 2 {
 		t.Fatalf("expected the break to surface at seq 2, got %d", result.FailureAt)
+	}
+}
+
+// TestAuditEventsRejectDirectTamperingByDefault proves the DB-level write
+// prevention itself (0005_audit_write_prevention.up.sql) — the other
+// tamper tests in this file prove the hash chain DETECTS tampering after
+// the fact; this proves the database PREVENTS it in the first place, for
+// the connection the real application actually uses (no
+// bypassImmutabilityTrigger call here, deliberately — that's the whole
+// point).
+func TestAuditEventsRejectDirectTamperingByDefault(t *testing.T) {
+	conn := testDB(t)
+	w := &ChainWriter{db: conn}
+	seedChain(t, w, 1)
+	ctx := context.Background()
+
+	_, err := conn.ExecContext(ctx, `UPDATE audit_events SET reason = 'forged' WHERE seq = 1`)
+	if err == nil {
+		t.Fatal("expected UPDATE on audit_events to be rejected by the DB trigger, it succeeded")
+	}
+	if !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("expected the trigger's own error message, got: %v", err)
+	}
+
+	_, err = conn.ExecContext(ctx, `DELETE FROM audit_events WHERE seq = 1`)
+	if err == nil {
+		t.Fatal("expected DELETE on audit_events to be rejected by the DB trigger, it succeeded")
+	}
+	if !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("expected the trigger's own error message, got: %v", err)
+	}
+
+	result, err := VerifyFull(ctx, conn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("expected the chain to still verify clean after both writes were rejected, got failure at seq %d: %s", result.FailureAt, result.FailureReason)
 	}
 }

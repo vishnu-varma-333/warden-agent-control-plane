@@ -32,9 +32,37 @@ func testDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { conn.Close() })
 
 	ctx := context.Background()
+	conn.ExecContext(ctx, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_no_update`)
+	conn.ExecContext(ctx, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_no_delete`)
 	conn.ExecContext(ctx, `TRUNCATE audit_events, audit_checkpoints`)
 	conn.ExecContext(ctx, `UPDATE audit_chain_state SET last_seq = 0, last_hash = '' WHERE id = 1`)
 	return conn
+}
+
+// bypassImmutabilityTrigger disables the DB-level write-prevention trigger
+// (0005_audit_write_prevention.up.sql) for the duration of one test, then
+// re-enables it — ALTER TABLE ... [DISABLE|ENABLE] TRIGGER is a catalog
+// change, not scoped to a session or transaction, so leaving it disabled
+// would silently weaken every test that runs afterward in the same suite.
+// Tests that use this are deliberately simulating an attacker with raw
+// database access bypassing the application (and, with this migration, the
+// normal write path) entirely — exactly the scenario Verify exists to
+// catch; see TestAuditEventsRejectDirectTamperingByDefault for the
+// trigger's own positive-path proof, which does NOT use this helper.
+func bypassImmutabilityTrigger(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE audit_events DISABLE TRIGGER audit_events_no_update`); err != nil {
+		t.Fatalf("disable update trigger: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE audit_events DISABLE TRIGGER audit_events_no_delete`); err != nil {
+		t.Fatalf("disable delete trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		conn.ExecContext(ctx, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_no_update`)
+		conn.ExecContext(ctx, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_no_delete`)
+	})
 }
 
 func sampleEvent() Event {
