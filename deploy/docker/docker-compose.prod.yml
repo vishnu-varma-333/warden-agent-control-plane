@@ -93,6 +93,42 @@ services:
       timeout: 5s
       retries: 20
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector.yaml:ro
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      # Same operator-posture reasoning as control-api's shared admin
+      # token (DECISIONS.md) — a single-VM demo, not multi-tenant.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3001:3000" # 3000 is the console's port
+    depends_on:
+      - prometheus
+      - tempo
+
   guard-classifier:
     image: warden-guard-classifier
     healthcheck:
@@ -114,6 +150,7 @@ services:
       GUARD_CLASSIFIER_ADDR: guard-classifier:50051
       DEMO_MCP_URL: http://demo-mcp-server:9090
       WARDEN_AUDIT_SIGNING_KEY: ${WARDEN_AUDIT_SIGNING_KEY:?set in .env — see deploy/docker/generate_env_secrets.sh}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     ports:
       - "8080:8080"
     depends_on:
@@ -131,6 +168,7 @@ services:
       REDPANDA_BROKERS: redpanda:9092
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env before deploying}
       WARDEN_AUDIT_PUBLIC_KEY: ${WARDEN_AUDIT_PUBLIC_KEY:?set in .env — see deploy/docker/generate_env_secrets.sh}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     ports:
       - "8081:8081"
     depends_on:
@@ -150,3 +188,5 @@ services:
 
 volumes:
   postgres-data:
+  tempo-data:
+  prometheus-data:

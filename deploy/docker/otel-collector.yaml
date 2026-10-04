@@ -10,10 +10,20 @@ processors:
   batch: {}
 
 exporters:
-  otlp:
-    endpoint: jaeger:4317
+  # Traces go to Tempo, not Jaeger — see DECISIONS.md's "Jaeger instead of
+  # Tempo" entry: Jaeger was a stated placeholder for local dev, and this
+  # is that placeholder finally being resolved per the spec's actual
+  # tech-stack choice, not a new decision.
+  otlp/tempo:
+    endpoint: tempo:4317
     tls:
       insecure: true
+  # Metrics are scraped BY Prometheus FROM this exporter's endpoint
+  # (:8889/metrics) — the collector doesn't push to Prometheus, Prometheus
+  # pulls from here, which is the standard OTel-collector-as-metrics-
+  # bridge pattern.
+  prometheus:
+    endpoint: 0.0.0.0:8889
   debug:
     verbosity: basic
 
@@ -22,4 +32,8 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp, debug]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]

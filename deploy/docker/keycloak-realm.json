@@ -1,6 +1,7 @@
 {
   "realm": "warden",
   "enabled": true,
+  "sslRequired": "none",
   "clients": [
     {
       "clientId": "agent-demo",

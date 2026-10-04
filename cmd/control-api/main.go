@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -132,6 +133,8 @@ func main() {
 	auditHandler := &httpapi.AuditHandler{DB: pgConn, AuditPubKey: auditPubKey}
 	spendHandler := &httpapi.SpendHandler{Budget: budgetEnforcer}
 
+	startPeriodicAuditVerification(ctx, pgConn, auditPubKey, 5*time.Minute)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("POST /approvals/{id}/decide", approvalsHandler.Decide)
@@ -185,4 +188,44 @@ func envOr(key, fallback string) string {
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// startPeriodicAuditVerification is what makes "alerts on audit-chain
+// verification failures" (a named production-readiness requirement) mean
+// something continuous rather than only reacting to an admin manually
+// clicking "verify" in the console. Every interval, it runs the same
+// check wardenctl and the console's button run (the checkpoint fast path
+// when a public key is configured, same reasoning as AuditHandler.Verify
+// — full-chain verification on every tick would get slower as the chain
+// grows, which is exactly what checkpoints exist to avoid) and records
+// the result via audit.RecordVerifyResult — what the Grafana alert rule
+// (deploy/docker/grafana/provisioning/alerting) actually watches.
+func startPeriodicAuditVerification(ctx context.Context, db *sql.DB, pubKey ed25519.PublicKey, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var result audit.VerifyResult
+				var err error
+				if pubKey != nil {
+					result, err = audit.VerifyFromLatestCheckpoint(ctx, db, pubKey)
+				} else {
+					result, err = audit.VerifyFull(ctx, db)
+				}
+				if err != nil {
+					slog.Error("periodic audit verification failed to run", "error", err)
+					continue
+				}
+				audit.RecordVerifyResult(ctx, "periodic", result)
+				if !result.OK {
+					slog.Error("periodic audit verification found tampering",
+						"failureAt", result.FailureAt, "reason", result.FailureReason)
+				}
+			}
+		}
+	}()
 }

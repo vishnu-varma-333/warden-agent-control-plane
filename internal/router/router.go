@@ -13,7 +13,26 @@ import (
 
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/breaker"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
+
+// providerErrorsCounter is the spec's "provider errors" observability
+// requirement, broken down by provider so a dashboard can tell which
+// specific backend is unhealthy rather than just "something is."
+var providerErrorsCounter metric.Int64Counter
+
+func init() {
+	var err error
+	providerErrorsCounter, err = otel.Meter("warden/router").Int64Counter(
+		"warden.provider.errors",
+		metric.WithDescription("Provider call failures by provider name"),
+	)
+	if err != nil {
+		panic(err)
+	}
+}
 
 const breakerCooldown = 10 * time.Second
 
@@ -69,6 +88,7 @@ func (r *Router) Chat(ctx context.Context, req provider.ChatRequest) (provider.C
 		resp, err := p.Chat(ctx, req)
 		if err != nil {
 			b.RecordFailure()
+			providerErrorsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("provider", name)))
 			lastErr = err
 			continue
 		}
@@ -100,6 +120,7 @@ func (r *Router) ChatStream(ctx context.Context, req provider.ChatRequest) (<-ch
 		stream, err := p.ChatStream(ctx, req)
 		if err != nil {
 			b.RecordFailure()
+			providerErrorsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("provider", name)))
 			lastErr = err
 			continue
 		}

@@ -24,7 +24,30 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
+
+// decisionsCounter is "decisions by type" from the spec's observability
+// requirements — allow vs. deny, broken down further by cache hit/miss so
+// a dashboard can show how much of the decision volume the Redis cache is
+// actually absorbing. Package-level and lazily usable even if metrics
+// were never initialized (telemetry.Init not called, e.g. in a unit
+// test): a nil global MeterProvider's instruments are valid no-ops, per
+// the OTel API's own contract, not a nil-pointer risk.
+var decisionsCounter metric.Int64Counter
+
+func init() {
+	var err error
+	decisionsCounter, err = otel.Meter("warden/policy").Int64Counter(
+		"warden.policy.decisions",
+		metric.WithDescription("Policy decisions by outcome and cache status"),
+	)
+	if err != nil {
+		panic(err) // only fails on a malformed instrument definition, never at runtime
+	}
+}
 
 // DefaultSeedPolicy is installed only if the policies table is empty, so a
 // fresh environment has something to evaluate against instead of denying
@@ -323,6 +346,18 @@ func logDecision(d Decision, agentID, actingAsUser, action, resourceType, resour
 		"policyVersion", d.PolicyVersion,
 		"reasons", d.Reasons,
 		"cacheHit", d.CacheHit,
+	)
+
+	outcome := "deny"
+	if d.Allow {
+		outcome = "allow"
+	}
+	decisionsCounter.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("outcome", outcome),
+			attribute.String("action", action),
+			attribute.Bool("cache_hit", d.CacheHit),
+		),
 	)
 }
 

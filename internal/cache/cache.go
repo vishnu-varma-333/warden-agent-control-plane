@@ -19,7 +19,28 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
+
+// requestsCounter is the spec's "cache hit rate" observability
+// requirement — a rate is just hits/(hits+misses) over a time window,
+// which is exactly what a Prometheus counter split by a "result"
+// attribute gives a dashboard for free (rate(...{result="hit"}) /
+// rate(...total)), rather than computing and exporting a ratio directly.
+var requestsCounter metric.Int64Counter
+
+func init() {
+	var err error
+	requestsCounter, err = otel.Meter("warden/cache").Int64Counter(
+		"warden.cache.requests",
+		metric.WithDescription("Exact-match response cache lookups by result"),
+	)
+	if err != nil {
+		panic(err)
+	}
+}
 
 type Cache struct {
 	client *redis.Client
@@ -50,6 +71,16 @@ func key(req provider.ChatRequest) (string, error) {
 // false on a miss (including any Redis error, which is treated as a miss
 // so a cache outage degrades to "always call the provider," not a failure).
 func (c *Cache) Get(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, bool) {
+	resp, hit := c.get(ctx, req)
+	result := "miss"
+	if hit {
+		result = "hit"
+	}
+	requestsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+	return resp, hit
+}
+
+func (c *Cache) get(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, bool) {
 	k, err := key(req)
 	if err != nil {
 		return provider.ChatResponse{}, false

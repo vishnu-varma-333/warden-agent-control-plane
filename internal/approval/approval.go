@@ -23,6 +23,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -74,7 +76,37 @@ type Manager struct {
 }
 
 func New(db *sql.DB, notifier Notifier, auditProducer audit.Producer) *Manager {
-	return &Manager{db: db, notifier: notifier, audit: auditProducer}
+	m := &Manager{db: db, notifier: notifier, audit: auditProducer}
+	m.registerQueueDepthMetric()
+	return m
+}
+
+// registerQueueDepthMetric is the spec's "approval queue depth"
+// observability requirement: an ObservableGauge, not a counter — queue
+// depth is a level (how many are pending right now), not an accumulating
+// count, and the OTel SDK calls this callback on its own collection
+// interval (see internal/telemetry's periodic reader) rather than needing
+// anything to poll it explicitly.
+func (m *Manager) registerQueueDepthMetric() {
+	meter := otel.Meter("warden/approval")
+	gauge, err := meter.Int64ObservableGauge(
+		"warden.approvals.pending",
+		metric.WithDescription("Approvals currently awaiting a human decision"),
+	)
+	if err != nil {
+		panic(err)
+	}
+	_, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		var count int64
+		if err := m.db.QueryRowContext(ctx, `SELECT count(*) FROM approvals WHERE state = $1`, StatePending).Scan(&count); err != nil {
+			return nil // a DB hiccup should skip this one collection, not crash metric export
+		}
+		o.ObserveInt64(gauge, count)
+		return nil
+	}, gauge)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (m *Manager) publishAudit(ctx context.Context, approvalID, decision, decidedBy string, snap CallSnapshot) {

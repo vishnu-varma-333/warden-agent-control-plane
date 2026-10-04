@@ -40,5 +40,6 @@ func (h *AuditHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	audit.RecordVerifyResult(r.Context(), "console", result)
 	writeJSON(w, result)
 }
