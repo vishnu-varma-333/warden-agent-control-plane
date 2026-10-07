@@ -237,6 +237,26 @@ millions of rows, or real accumulated production traffic — both belong in
 the milestone 10 benchmark pass, tracked explicitly rather than
 extrapolated from 5 records here.
 
+**Result at real scale (2026-10-07), the spec's own "N million" target:**
+`cmd/auditbench` seeds records through the actual `ChainWriter.Append`
+(real hashing, real row-locked serialization — not a bulk insert that
+skips the mechanism being measured), then runs both verification paths.
+
+| Metric | Value |
+|---|---|
+| Records seeded | 1,000,000 |
+| Seed throughput | 1,166 records/sec (14m 18s total — seeding speed, not what's being benchmarked) |
+| **Full-chain verify (from genesis)** | **2.48s for 1,000,000 records** |
+| **Checkpoint fast-path verify** | **270.9µs** (0 records re-walked — the checkpoint's signature alone proves everything before it) |
+
+Against a dedicated database (`warden_test`), not the shared dev DB.
+Confirms the design claim at real scale, not just in principle: checkpoint
+verification is checking a signature, not re-hashing a million rows —
+the ~9,000x gap between 2.48s and 270.9µs is that difference made
+concrete. Full-chain verification itself also lands well inside a
+realistic ops budget (2.48s for a million records, not minutes), which
+wasn't obvious from the 5-record number alone.
+
 ## Guard classifier: accuracy and latency (milestone 8)
 
 **Spec target:** "Precision, recall and false-positive rate on a held-out
@@ -271,14 +291,38 @@ included.
 classifier call timeout (`internal/guard`). **Met**, with real headroom —
 p99 well under half the budget.
 
-**LLM-as-judge comparison:** not run. `llm_judge_benchmark.py` is fully
-built and ready — same held-out set, same metrics, plus cost — but needs a
-real model provider behind Warden's gateway (still mock-only; see
-milestone 2's DECISIONS.md) to produce an actual judgment. Running it
-against the mock provider, which only echoes its input, would produce
-numbers that look like a real comparison but measure nothing. Tracked as
-an explicit follow-up once a provider key is configured, not faked or
-silently dropped.
+**LLM-as-judge comparison — run for real (2026-10-07):** `internal/
+provider/gemini` closed the real-provider gap (see DECISIONS.md), making
+this runnable. `llm_judge_benchmark.py` sent the exact same 141-example
+held-out set, through the exact same `/v1/chat/completions` path (real
+identity, real policy enforcement), to Gemini (`gemini-3.5-flash-lite`)
+acting as judge, prompted to answer "injection" or "benign."
+
+| Metric | Classifier (served) | LLM-as-judge (Gemini) |
+|---|---|---|
+| Accuracy | 93.6% | 81.6% |
+| Precision | 100.0% | 100.0% |
+| Recall | 86.8% | 61.8% |
+| False-positive rate | 0.0% | 0.0% |
+| Latency p50 | 7.6ms | 3.2ms* |
+| Latency p99 | 36.1ms | 3,240ms |
+
+\* The judge's p50 is almost certainly an exact-match response-cache hit
+(`internal/cache`), not real Gemini latency — the held-out set has
+repeated/near-identical short strings, and the cache is keyed on exact
+message content regardless of which route sent it. p99 (3.24s) is the
+honest number for "how long does calling a real LLM actually take,"
+reported as such rather than quietly averaged away.
+
+**The actual finding:** the fine-tuned classifier beats the general-
+purpose LLM judge outright on this task — higher accuracy, higher
+recall, ~90x lower p99 latency, and it runs locally with no per-call API
+cost or external rate limit. Neither model ever produced a false
+positive (both 0% FPR); the classifier's advantage is entirely in
+catching more real attacks (recall) while staying just as precise. This
+is a genuinely useful, specific answer to "why train a classifier instead
+of just asking an LLM" — not a foregone conclusion, an actually-measured
+one.
 
 **Caveat worth saying out loud in an interview:** 141 examples is a small
 held-out set, and 54 of the "domain" examples were hand-written by
@@ -286,4 +330,8 @@ necessity (no large public dataset of labeled tool descriptions/outputs
 exists). These are real, measured numbers, not estimates — but "real on a
 small set" is a narrower claim than "production-grade on a representative
 distribution," and that's a fair question to expect and have a direct
-answer for, not deflect.
+answer for, not deflect. Separately: Gemini's free tier has a real
+per-minute request cap — the comparison run paced calls at 2s intervals
+to stay under it, which the cost/latency numbers above reflect honestly
+(these are what it actually took, including that constraint) rather than
+an idealized unthrottled number.

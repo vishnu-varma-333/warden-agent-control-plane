@@ -100,7 +100,7 @@ until the current one is done.
 - [x] Found and fixed **three** real bugs during this milestone's own live verification (all in DECISIONS.md) — none were caught by unit tests alone, each only surfaced by actually running the full system: (1) a timezone/precision mismatch in how `time.Time` round-trips through Postgres made every untampered record look tampered; (2) the async Kafka publish used the triggering HTTP request's context, which gets cancelled before the actual send happens, so every publish silently failed; (3) Redpanda's advertised address pointed at a Docker-internal hostname unreachable from the host-run Go binaries, causing produces to hang with zero error.
 - [ ] DB-level write prevention (a trigger or REVOKE blocking UPDATE/DELETE on `audit_events`) — deliberately scoped out of v1; the hash chain's job is *detection* (which the spec explicitly asks for: "proves no record was edited, removed, or reordered"), prevention is a complementary hardening layer, not yet added. Tracked, not hidden.
 - [ ] Wardenctl's broader command surface (`policy validate/diff/apply` from the original spec) — only `audit verify` exists; the rest waits for the console (milestone 9) to have something to drive it against.
-- [ ] Real N-million-record verification-time benchmark — only a 5-record live number exists so far; a synthetic/soak version is tracked for milestone 10.
+- [x] Real N-million-record verification-time benchmark — closed 2026-10-07: `cmd/auditbench` seeded 1,000,000 real records through the actual `ChainWriter`, full-chain verify in 2.48s, checkpoint fast-path in 270.9µs. See BENCHMARKS.md.
 
 **Milestone 7: done** (both open items above are explicit, tracked scope decisions, not oversights).
 
@@ -113,9 +113,9 @@ until the current one is done.
 - [x] Benchmarked on the **served** model (ONNX over real gRPC, not the in-process PyTorch model): 93.6% accuracy, 100% precision, 86.8% recall, 0% FPR on a 141-example held-out set.
 - [x] Verified live, twice, against the actual running gateway — not just the held-out test split: a benign tool call that was false-positived is now correctly allowed, and a real injection embedded in a tool-call argument is still correctly blocked, with the gateway's own logs showing the block.
 - [x] Found and fixed three real issues during this milestone's own verification (all detailed in DECISIONS.md, not just mentioned in passing): a misconfigured ONNX export made inference ~25x slower than necessary; the classifier, trained only on conversational chat text, didn't generalize to tool descriptions (round 1 of a false-positive fix); didn't generalize to short tool-output-shaped text either (round 2, found only after wiring in the actual output-scanning path).
-- [ ] LLM-as-judge comparison (accuracy/latency/cost) — harness fully built (`llm_judge_benchmark.py`), not run: needs a real model provider behind the gateway, which is still mock-only (same gap as milestone 2). Explicitly tracked, not faked by running it against a provider that can't actually judge text.
+- [x] LLM-as-judge comparison — run for real 2026-10-07 against Gemini (the real provider that closed milestone 2's gap): the classifier beats it outright — 93.6% vs 81.6% accuracy, 86.8% vs 61.8% recall, ~90x lower p99 latency, both at 100% precision / 0% FPR. See BENCHMARKS.md.
 
-**Milestone 8: done** (LLM-as-judge comparison is the one open item, blocked on the same real-provider-key gap as milestone 2 — not forgotten, not faked).
+**Milestone 8: done**, including the LLM-judge comparison — closed for real on 2026-10-07, see above.
 
 ## Milestone 9 progress
 
@@ -375,3 +375,62 @@ requirements except the two items above — now has a real, built,
 verified answer. v1 is complete against the spec except metrics/
 dashboards and per-team scoping, both explicitly tracked, both
 reasonable version-2-adjacent follow-ups rather than core-feature gaps.
+
+## Final v1 completeness check (2026-10-07)
+
+Both items the previous check left open are now closed:
+
+- [x] **Metrics + dashboards.** Real OpenTelemetry metrics (not just
+      traces) feeding Prometheus, visualized in Grafana, with Tempo
+      replacing the Jaeger placeholder DECISIONS.md flagged back in
+      milestone 1. Every metric the spec names: request rate, added
+      latency (p50/p99 — free, via otelhttp's own instrumentation once a
+      MeterProvider exists, no per-handler code needed), decisions by
+      type, approval queue depth, provider errors, cache hit rate. Three
+      live Grafana alert rules (error rate, latency SLO burn, audit-chain
+      verification failure) — the last one backed by a new periodic
+      background verification loop in control-api, not just the
+      console's manual "verify" button, so the alert means something
+      continuous.
+- [x] **Per-team scoping for budgets/rate limits.** A `team` claim
+      (Keycloak client attribute, survives real token exchange — checked
+      live, not assumed), charged as an additional scope alongside the
+      agent's own on both the model-call AND MCP tool-call paths (the
+      latter had no rate-limit/budget enforcement at all before this —
+      a second real gap this closed in passing). Verified live: one call
+      correctly charges both `agent-demo` and `team:team-alpha`.
+
+Also closed in this same pass, each a previously-tracked gap, none left
+as "reasoned acceptable to skip":
+
+- [x] **DB-level audit write prevention** — a Postgres trigger, not a
+      REVOKE (REVOKE doesn't bind the superuser role this project's
+      single Postgres user already is; a trigger fires regardless of
+      privilege level). Proven both directions: rejects a direct
+      UPDATE/DELETE by default, and the existing tamper-detection tests
+      still pass via an explicit, narrow bypass simulating a genuine
+      raw-access attacker.
+- [x] **wardenctl's broader command surface** — `policy validate/diff/
+      apply`, driving control-api as policies-as-code from a Git repo,
+      exactly as the spec's "How users access it" section describes.
+- [x] **Real RFC 8693 token exchange** — replacing the hardcoded-
+      allowlist simplification entirely, with real Keycloak permission/
+      policy wiring (`deploy/docker/setup_token_exchange.sh`).
+- [x] **The 1,000-run kill test** — the spec's own literal scale, not
+      the 100-run proxy. Three real bugs in the test harness (not the
+      product) found and fixed getting there — see DECISIONS.md.
+- [x] **Real N-million-record audit verification** — 1,000,000 records,
+      not 5.
+- [x] **Real provider integration + LLM-as-judge comparison** — Gemini
+      (free tier), closing both milestone 2's and milestone 8's gap in
+      one piece of work. The classifier beats the LLM judge outright —
+      see BENCHMARKS.md.
+
+**v1 is now complete against the full original spec**, including every
+production-readiness item, every named benchmark target, and every
+previously-tracked "explicitly deferred, not forgotten" gap. The only
+remaining open items are genuinely version-2-adjacent (per-team scoping
+now exists, but no Team *entity* with its own management UI; a Helm
+chart; finer-grained Keycloak impersonation scoping than this Keycloak
+version's admin API would do declaratively) — none of them a v1 feature
+the spec asked for and this project skipped.

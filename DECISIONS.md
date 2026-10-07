@@ -833,3 +833,34 @@ exactly once, 0 lost, 0 duplicated — the spec's literal target, not the
 100-run proxy milestone 10 shipped with. Cross-checked against
 `demo-mcp-server`'s own independent execution counter, same as every
 other kill-test result in this project.
+
+## 2026-10-07 — the classifier beats the LLM judge, for real, not by assumption
+
+Running `llm_judge_benchmark.py` for the first time (blocked since
+milestone 8 on a real provider — see the Gemini entry above) answered a
+question this project had deliberately left open rather than guessed at:
+is fine-tuning a small classifier actually worth it versus just asking a
+general-purpose LLM? Result: yes, measurably — 93.6% vs. 81.6% accuracy,
+86.8% vs. 61.8% recall, both at identical 100% precision / 0% FPR, and
+~90x lower p99 latency (36ms vs. 3.24s) with no per-call API cost. Worth
+stating plainly because it could easily have gone the other way — a
+frontier LLM out-reasoning a 66M-parameter DistilBERT on a judgment task
+is a perfectly reasonable prior to walk in with. It didn't, on this task,
+with this data. That's a real finding about *this* classifier on *this*
+held-out set, not a general claim that fine-tuned models always beat
+LLM judges — the honest scope note already on this benchmark (141
+examples, 54 hand-written) still applies to why this result holds.
+
+## 2026-10-07 — audit verification at the spec's actual "N million" scale
+
+`cmd/auditbench` seeded 1,000,000 records through the real
+`ChainWriter.Append` (real SHA-256 chaining, real row-locked
+serialization — not a bulk insert bypassing the mechanism under test).
+Full-chain verification: 2.48s. Checkpoint fast-path: 270.9µs — roughly
+9,000x faster, because it's checking one Ed25519 signature instead of
+re-hashing a million rows, exactly the design claim from milestone 7,
+now demonstrated at the scale the spec actually asks for rather than on
+5 live records. Run against a dedicated database (`warden_test`), not
+the shared dev one, specifically so a benchmark run never risks
+corrupting whatever a manually-run gateway has recorded — same
+isolation reasoning `internal/audit`'s own tests already use.

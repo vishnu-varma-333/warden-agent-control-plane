@@ -59,7 +59,8 @@ alongside the mock ones used for deterministic testing.
 | Security test suite (known attack patterns, not training data) | 100% recall on real attacks (15/15), 3 benign false positives |
 | Kill test (real process kills, not simulated) | 1,000/1,000 runs, 0 lost, 0 duplicated approvals — the spec's own literal target |
 | Fault tests (real Toxiproxy network failures) | Redis loss, database failover, failing provider — all 3 passed |
-| Audit verification (checkpoint fast path vs. full chain) | 1.0ms vs. 9.2ms on current chain length |
+| Audit verification at real scale, 1M records (checkpoint fast path vs. full chain) | 270.9µs vs. 2.48s |
+| Classifier vs. LLM-as-judge (Gemini), accuracy / recall / p99 latency | 93.6% vs 81.6% / 86.8% vs 61.8% / 36ms vs 3,240ms — the classifier wins on both accuracy and speed |
 | Tool tampering detection | 100% of injected definition changes blocked |
 
 Every one of these is a reported, reproducible result — the scripts that
