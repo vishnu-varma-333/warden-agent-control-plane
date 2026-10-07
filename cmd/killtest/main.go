@@ -2,20 +2,10 @@
 // approval-gated tool, confirm it's pending, kill -9 the real gateway
 // process (not a graceful shutdown), restart it, approve, and confirm the
 // agent's retry executes exactly once — repeated N times, not once.
-//
-// Why N=100 by actual process kills rather than the spec's 1,000: a real
-// OS-level kill+restart cycle (~1.5-2s) makes 1,000 runs a ~30-50 minute
-// loop that mostly re-demonstrates the same fact each time — a committed
-// Postgres write survives the process that wrote it, which is a property
-// of Postgres, not of this code. What COULD vary run to run is adversarial
-// timing around the atomic claim itself, and that's already covered more
-// rigorously by internal/approval's own -race-flagged concurrent-goroutine
-// test (TestClaimExecutionOnlyAllowsOneWinner, 20 concurrent goroutines,
-// run on every CI build, not just once during a benchmark pass). This
-// program's job is the integration-level proof — a real crash, a real
-// restart, a real retry, through the real MCP wire protocol — at a sample
-// size large enough to rule out a rare flake, not to re-derive durability
-// guarantees unit tests already prove deterministically. See DECISIONS.md.
+// Defaults to N=100 (a quick smoke run); the spec's actual target of
+// 1,000 has been run for real (-n 1000), passing 1000/1000 — see
+// BENCHMARKS.md and DECISIONS.md for that run and three real bugs its
+// first attempt surfaced, all in this harness, none in the product.
 package main
 
 import (
@@ -52,9 +42,10 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type approvalDetail struct {
-	ID         string `json:"id"`
-	ResourceID string `json:"resourceId"`
-	State      string `json:"state"`
+	ID             string  `json:"id"`
+	IdempotencyKey *string `json:"idempotencyKey"`
+	ResourceID     string  `json:"resourceId"`
+	State          string  `json:"state"`
 }
 
 func main() {
@@ -106,23 +97,43 @@ func run(n int, gatewayBin, gatewayAddr, controlAPIAddr, adminToken, keycloakURL
 		// gateway mid-flight aborts this specific HTTP call, same as a
 		// real agent would see a connection error. The row it already
 		// wrote to Postgres is what we're testing the durability of.
+		// Logged at a quiet level, not as a failure: a "connection
+		// refused" here on every single successful run is the expected
+		// shape of this test, not a symptom — it's what killing the
+		// gateway mid-request looks like from the caller's side.
 		go func() {
-			_ = callDeleteData(ctx, "http://localhost"+gatewayAddr+"/mcp", token, key)
+			if err := callDeleteData(ctx, "http://localhost"+gatewayAddr+"/mcp", token, key); err != nil {
+				log.Printf("iter %d: original call's connection broke (expected — the gateway kill below happened while it was still in flight): %v", i, err)
+			}
 		}()
-		time.Sleep(300 * time.Millisecond) // let the Request() write land before we kill
 
-		pending, err := findPendingApproval(controlAPIAddr, adminToken)
-		if err != nil || pending == "" {
-			lost++
-			log.Printf("iter %d: FAIL — no pending approval found before kill: %v", i, err)
-			continue
+		// Poll for the approval instead of a single fixed-delay check —
+		// found live that a hard-coded sleep is exactly as reliable as
+		// whatever's slowest that day (Keycloak's token exchange adds a
+		// second real round trip per call that didn't exist before real
+		// RFC 8693 exchange replaced the old static claim, pushing a
+		// fixed 300ms budget from "comfortable" to "sometimes late").
+		// Polling absorbs that jitter instead of hard-failing on it.
+		var pending string
+		var findErr error
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+			pending, findErr = findPendingApproval(controlAPIAddr, adminToken, key)
+			if findErr == nil && pending != "" {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 
+		// Whether this iteration's own approval was found or not, the
+		// gateway always gets killed and restarted before moving on —
+		// found live that skipping this on a miss (via a bare `continue`)
+		// leaves THIS iteration's goroutine and gateway both still alive
+		// to collide with the NEXT iteration's, cascading one slow miss
+		// into every iteration after it failing too.
 		if err := gw.Process.Kill(); err != nil {
 			return fmt.Errorf("iter %d: kill gateway: %w", i, err)
 		}
 		_ = gw.Wait()
-
 		gw, err = startGateway(gatewayBin, gatewayAddr)
 		if err != nil {
 			return fmt.Errorf("iter %d: restart gateway: %w", i, err)
@@ -131,13 +142,25 @@ func run(n int, gatewayBin, gatewayAddr, controlAPIAddr, adminToken, keycloakURL
 			return fmt.Errorf("iter %d: %w", i, err)
 		}
 
-		if err := decideApproval(controlAPIAddr, adminToken, pending, "approved"); err != nil {
-			return fmt.Errorf("iter %d: decide: %w", i, err)
+		if findErr != nil || pending == "" {
+			lost++
+			log.Printf("iter %d: FAIL — no pending approval found before kill: %v", i, findErr)
+			continue
 		}
 
-		token, _ = fetchToken(keycloakURL)
-		res1, err1 := callDeleteDataSync(ctx, "http://localhost"+gatewayAddr+"/mcp", token, key)
-		res2, err2 := callDeleteDataSync(ctx, "http://localhost"+gatewayAddr+"/mcp", token, key)
+		if err := decideApproval(controlAPIAddr, adminToken, pending, "approved"); err != nil {
+			lost++
+			log.Printf("iter %d: FAIL — decide: %v", i, err)
+			continue
+		}
+
+		// A new variable, not reassigning the `token` the still-possibly-
+		// in-flight fire-and-forget goroutine above closed over — that
+		// goroutine reads `token` too, and reassigning the same variable
+		// here raced with it.
+		retryToken, _ := fetchToken(keycloakURL)
+		res1, err1 := callDeleteDataSync(ctx, "http://localhost"+gatewayAddr+"/mcp", retryToken, key)
+		res2, err2 := callDeleteDataSync(ctx, "http://localhost"+gatewayAddr+"/mcp", retryToken, key)
 		if err1 != nil || err2 != nil {
 			log.Printf("iter %d: retry errors: %v / %v", i, err1, err2)
 		}
@@ -162,14 +185,33 @@ func run(n int, gatewayBin, gatewayAddr, controlAPIAddr, adminToken, keycloakURL
 	fmt.Println()
 	fmt.Printf("Kill test: %d runs, %d executed exactly once, %d lost, %d duplicated\n", n, executed, lost, duplicated)
 	if lost > 0 || duplicated > 0 {
-		os.Exit(1)
+		// A plain error, not os.Exit(1) here: os.Exit terminates the
+		// process immediately WITHOUT running this function's own
+		// deferred gw.Process.Kill() — found live that every run ending
+		// up here orphaned its gateway child process, which then
+		// survived to collide with the NEXT invocation's own gateway on
+		// the same port, turning one bad run into a confusing cascade of
+		// failures across every run after it. Returning normally lets
+		// the defer fire before main() decides the exit code.
+		return fmt.Errorf("%d lost, %d duplicated (see above)", lost, duplicated)
 	}
 	return nil
 }
 
 func startGateway(bin, addr string) (*exec.Cmd, error) {
 	cmd := exec.Command(bin)
-	cmd.Env = append(os.Environ(), "GATEWAY_ADDR="+addr)
+	// Rate limit/budget now also gate the MCP tool-call path (per-agent
+	// AND per-team — see internal/mcpgateway), not just /v1/chat/
+	// completions. Raised here for the same reason deploy/bench's load
+	// tests raise them: this test's rapid-fire repeated calls are
+	// exercising kill/restart durability, not the throttle itself (that
+	// has its own tests in internal/ratelimit and internal/budget) —
+	// without this, a real "no pending approval found" failure (quota
+	// exhausted, call never reached the approval gate at all) looks
+	// identical to an actual lost-approval bug in this program's own
+	// output. Found live: the very first run after adding MCP-path
+	// scoping failed 100% of iterations this way.
+	cmd.Env = append(os.Environ(), "GATEWAY_ADDR="+addr, "RATE_LIMIT_PER_MINUTE=1000000", "BUDGET_LIMIT_PER_HOUR=1000000")
 	logFile, err := os.OpenFile("/tmp/killtest-gateway.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err
@@ -281,7 +323,16 @@ func countExecutions(res *mcp.CallToolResult) int {
 	return 0
 }
 
-func findPendingApproval(controlAPIAddr, adminToken string) (string, error) {
+// findPendingApproval matches on THIS iteration's own idempotency key, not
+// just "the first pending delete_data approval" — found live that the
+// latter is unsafe: a previous iteration's fire-and-forget goroutine (its
+// MCP client may still be retrying/reconnecting after that iteration's
+// gateway was killed, independent of the main loop having already moved
+// on) can still be creating or touching approvals concurrently with a
+// later iteration's own. Matching the exact key this call generated makes
+// which approval is "mine" unambiguous regardless of what else is in
+// flight.
+func findPendingApproval(controlAPIAddr, adminToken, idempotencyKey string) (string, error) {
 	req, _ := http.NewRequest("GET", controlAPIAddr+"/approvals?state=pending", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	resp, err := http.DefaultClient.Do(req)
@@ -294,11 +345,11 @@ func findPendingApproval(controlAPIAddr, adminToken string) (string, error) {
 		return "", err
 	}
 	for _, d := range details {
-		if d.ResourceID == "delete_data" && d.State == "pending" {
+		if d.ResourceID == "delete_data" && d.State == "pending" && d.IdempotencyKey != nil && *d.IdempotencyKey == idempotencyKey {
 			return d.ID, nil
 		}
 	}
-	return "", fmt.Errorf("no pending delete_data approval found")
+	return "", fmt.Errorf("no pending delete_data approval found for idempotency key %s", idempotencyKey)
 }
 
 func decideApproval(controlAPIAddr, adminToken, id, state string) error {

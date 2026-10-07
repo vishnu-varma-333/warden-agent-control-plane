@@ -57,14 +57,28 @@ def held_out_test_set():
     return all_texts, all_labels
 
 
-def judge(endpoint, token, acting_as, model, text):
-    resp = requests.post(
-        endpoint,
-        headers={"Authorization": f"Bearer {token}", "X-Acting-As": acting_as},
-        json={"model": model, "messages": [{"role": "user", "content": JUDGE_PROMPT.format(text=text)}]},
-        timeout=30,
-    )
-    resp.raise_for_status()
+def judge(endpoint, token, acting_as, model, text, retries=6):
+    # Gemini's free tier genuinely returns transient 503s under load (seen
+    # live running this) — retried here, not treated as a real failure of
+    # the gateway or the comparison itself, since one momentary upstream
+    # hiccup out of ~140 calls isn't what this benchmark is measuring.
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            resp = requests.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {token}", "X-Acting-As": acting_as},
+                json={"model": model, "messages": [{"role": "user", "content": JUDGE_PROMPT.format(text=text)}]},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            break
+        except requests.exceptions.HTTPError as e:
+            last_exc = e
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+    else:
+        raise last_exc
     content = resp.json()["choices"][0]["message"]["content"].strip().lower()
     return 1 if "injection" in content else 0
 
@@ -81,10 +95,17 @@ def main():
 
     preds = []
     latencies = []
-    for text in texts:
+    for i, text in enumerate(texts):
         start = time.perf_counter()
         preds.append(judge(args.endpoint, args.token, args.acting_as, args.model, text))
         latencies.append((time.perf_counter() - start) * 1000.0)
+        # Paced, not fired as fast as possible — free-tier Gemini has a
+        # real per-minute request cap, and repeated 503s mid-run turned
+        # out to be that limit, not transient overload (the retry/backoff
+        # above alone couldn't outlast it under sustained load).
+        time.sleep(2)
+        if (i + 1) % 20 == 0:
+            print(f"  {i + 1}/{len(texts)} judged...")
 
     tn, fp, fn, tp = confusion_matrix(labels, preds).ravel()
     precision = tp / (tp + fp) if (tp + fp) else 0.0

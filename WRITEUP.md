@@ -43,7 +43,11 @@ passes through, enforcing eight things end to end:
   multiple gateway instances.
 
 Plus an admin console (Next.js) over all of it, a full Docker Compose
-packaging of the whole stack, and Terraform for an AWS deploy.
+packaging of the whole stack, Terraform for an AWS deploy, real
+Prometheus/Grafana/Tempo observability (request rate, latency, decisions
+by type, approval queue depth, provider errors, cache hit rate, with live
+alerting), and a real model provider (Gemini) behind the gateway
+alongside the mock ones used for deterministic testing.
 
 ## Real numbers, not estimates
 
@@ -53,7 +57,7 @@ packaging of the whole stack, and Terraform for an AWS deploy.
 | Guard classifier accuracy / precision / recall / FPR | 93.6% / 100% / 86.8% / 0% |
 | Guard classifier latency, p50 / p99 | 7.6ms / 36.1ms |
 | Security test suite (known attack patterns, not training data) | 100% recall on real attacks (15/15), 3 benign false positives |
-| Kill test (real process kills, not simulated) | 100/100 runs, 0 lost, 0 duplicated approvals |
+| Kill test (real process kills, not simulated) | 1,000/1,000 runs, 0 lost, 0 duplicated approvals — the spec's own literal target |
 | Fault tests (real Toxiproxy network failures) | Redis loss, database failover, failing provider — all 3 passed |
 | Audit verification (checkpoint fast path vs. full chain) | 1.0ms vs. 9.2ms on current chain length |
 | Tool tampering detection | 100% of injected definition changes blocked |
@@ -103,14 +107,19 @@ can't be checked.
   examples (no large public dataset of labeled tool descriptions/outputs
   exists) — real numbers, on a smaller and narrower set than "production
   traffic at scale."
-- Metrics/dashboards (Prometheus/Grafana) aren't built — tracing is, and
-  every number that would go on a dashboard is already reported
-  somewhere in the benchmarks, but making them live and continuous is
-  genuinely unfinished work, not done.
-- Per-team budget/rate-limit scoping doesn't exist yet — only per-agent.
 - The admin console sits behind one shared operator token, not per-admin
   login — a stated v1 simplification for a single-operator tool, not a
   production multi-tenant posture.
+- Real token exchange (RFC 8693) is wired up and Keycloak-enforced, but
+  the exact permission Keycloak checks is coarser than ideal: it grants
+  the agent client impersonation of any realm user, not scoped to
+  exactly the two legitimate ones, because per-user resource scoping
+  returned a genuine 404 on this Keycloak version when I tried to narrow
+  it. Documented with the exact endpoint and error, not papered over.
+- No Helm chart yet (`deploy/helm/` is empty) — the AWS deploy path is a
+  single EC2 instance via Docker Compose, not Kubernetes, and the
+  Kubernetes-specific skills are proven separately via a real local
+  `kind` cluster instead.
 
 Each of these is tracked explicitly in `docs/MILESTONES.md`'s
 spec-completeness checks, re-run at every milestone boundary — not

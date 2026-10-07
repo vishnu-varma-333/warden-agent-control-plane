@@ -132,25 +132,20 @@ duplicated approvals across 1,000 runs." Milestone 6 did this once,
 manually, with full reasoning. This is the automated version —
 `cmd/killtest`, a real program, not a shell loop pretending to be one.
 
-**Why 100 real process kills, not 1,000 — stated honestly, not
-quietly substituted:** each run is a genuine `kill -9` of a real gateway
-binary followed by a real restart (~0.5s/iteration), so 1,000 runs would
-take 15-20+ minutes to mostly re-demonstrate the same fact each time — a
-committed Postgres write survives the process that wrote it, which is a
-property of Postgres transactions, not of this code. What actually
-*could* vary run to run — adversarial timing around the atomic execution
-claim itself — is covered more rigorously by `internal/approval`'s own
-`-race`-flagged concurrent-goroutine test (20 concurrent goroutines,
-run on every CI build, not just once during a benchmark pass). 100 real
-crash-recovery cycles is the integration-level proof (real crash, real
-restart, real MCP retry) at a sample size large enough to rule out a
-rare flake; see `cmd/killtest`'s own doc comment for the full reasoning.
-
-**Result (2026-10-03):** 100 runs, 100 executed exactly once, 0 lost, 0
-duplicated. Cross-checked independently: `demo-mcp-server`'s own call
-counter (a process the test harness never directly controls) landed at
-exactly the same total, confirmed from its own log, not just the test
-harness's self-reported count.
+**Result (2026-10-07), run at the spec's own literal scale:** 1,000
+runs, 1,000 executed exactly once, 0 lost, 0 duplicated. Cross-checked
+independently: `demo-mcp-server`'s own call counter (a process the test
+harness never directly controls) landed at exactly the matching total,
+confirmed from its own log, not just the test harness's self-reported
+count. Milestone 10 originally reported this at 100 runs with a reasoned
+trade-off for why not 1,000; asked directly to actually run it at scale
+rather than rely on that reasoning, the first attempt at 1,000 failed
+100% of iterations and surfaced three real bugs — a stale `control-api`
+binary, an `os.Exit` skipping cleanup and orphaning gateway processes
+across runs, and an approval-matching race exposed by the extra latency
+real token exchange (below) added — all three in `cmd/killtest` itself,
+none in the product. Full writeup in DECISIONS.md. Once fixed, 1,000/
+1,000 clean, no further issues.
 
 ## Security test suite (milestone 10)
 

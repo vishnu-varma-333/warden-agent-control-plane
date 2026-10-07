@@ -37,7 +37,7 @@ until the current one is done.
 - [x] Mock provider (`internal/provider/mock`) standing in for real backends, with on/off "unhealthy" switch to prove fallback deterministically.
 - [x] End-to-end manual verification: non-stream call, cache hit, SSE stream, and fallback-when-primary-down — all observed in running logs, not just code review.
 - [x] First latency benchmark: see `docs/BENCHMARKS.md` — p99 4.49ms vs. 15ms target.
-- [ ] Real provider integration (OpenAI/Anthropic/other) — deferred until an API key is supplied; see DECISIONS.md.
+- [x] Real provider integration — closed 2026-10-07: Gemini (free-tier API key, no funded account needed — see DECISIONS.md), `internal/provider/gemini`, verified live with a real non-streaming and streaming response through the full stack.
 
 **Milestone 2: core logic done; real-provider wiring open pending an API key.**
 
@@ -49,9 +49,9 @@ until the current one is done.
 - [x] `internal/ratelimit`: distributed, Redis-backed, atomic via a Lua script — unit-tested per-key isolation and threshold behavior.
 - [x] `internal/budget`: distributed spend cap, atomic reject-without-partial-charge — unit-tested specifically for that atomicity.
 - [x] End-to-end verified live: 401 (no token) / 400 (no acting-as header) / 403 (disallowed acting-as user) / 200 (valid) / 429 (rate limit tripped, confirmed at a demo limit of 3).
-- [ ] Real token-exchange (RFC 8693) instead of the hardcoded-allowlist simplification — noted as a deliberate v1 simplification in DECISIONS.md, not a gap to silently carry forward.
+- [x] Real token-exchange (RFC 8693) — closed 2026-10-07, replacing the hardcoded-allowlist simplification entirely. Real Keycloak permission/policy wiring (`deploy/docker/setup_token_exchange.sh`), verified live both ways (an allowed exchange succeeds, a disallowed one is rejected by Keycloak itself, not an app-level check). See DECISIONS.md.
 
-**Milestone 3: done** (simplification on token exchange documented, not hidden).
+**Milestone 3: done**, including the token-exchange simplification — closed for real on 2026-10-07, see above.
 
 ## Milestone 4 progress
 
@@ -215,13 +215,14 @@ milestone 3's budget design, not new scope this milestone skipped).
       failures, not mocked ones. All three scenarios the spec names
       (Redis loss, database failover, failing provider) verified live,
       passing.
-- [x] **Automated kill test**: `cmd/killtest`, 100 real `kill -9` +
-      restart cycles through the real MCP protocol (not a shell loop),
-      cross-verified against an independent downstream counter. 0 lost,
-      0 duplicated. See BENCHMARKS.md for why 100 real process kills
-      rather than the spec's 1,000 — a reasoned trade-off, not a
-      shortcut, explained in both BENCHMARKS.md and the program's own
-      doc comment.
+- [x] **Automated kill test**: `cmd/killtest`, real `kill -9` + restart
+      cycles through the real MCP protocol (not a shell loop),
+      cross-verified against an independent downstream counter. Run at
+      the spec's own literal target on 2026-10-07: 1,000/1,000 executed
+      exactly once, 0 lost, 0 duplicated. The first attempt at that scale
+      failed 100% of iterations and surfaced three real bugs — all in
+      this test harness, none in the product — detailed in full in
+      DECISIONS.md.
 - [x] **Security test suite**: `services/guard-classifier/
       security_test.py` — 21 known real-world injection/poisoning
       patterns across 7 categories, testing generalization beyond the

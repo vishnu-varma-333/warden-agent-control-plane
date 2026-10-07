@@ -21,13 +21,14 @@ import (
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/approval"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/audit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/budget"
-	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/guard"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/cache"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/db"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/guard"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/httpapi"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/identity"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/mcpgateway"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/policy"
+	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider/gemini"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/provider/mock"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/ratelimit"
 	"github.com/vishnu-varma-333/warden-agent-control-plane/internal/registry"
@@ -85,6 +86,20 @@ func main() {
 	r.RegisterProvider(primary)
 	r.RegisterProvider(secondary)
 	r.AddRoute(router.Route{ModelAlias: "mock-model", Providers: []string{"mock-primary", "mock-secondary"}})
+
+	// Real provider integration (milestone 2's tracked gap, closed here):
+	// Gemini specifically because it has a genuinely free API tier, so
+	// this doesn't need a funded account to exercise for real. Only
+	// registered when a key is actually configured — the mock routes
+	// above are untouched either way, so nothing about local dev changes
+	// for anyone who hasn't set this.
+	if geminiKey := os.Getenv("GEMINI_API_KEY"); geminiKey != "" {
+		geminiModel := envOr("GEMINI_MODEL", "gemini-3.5-flash-lite")
+		gem := gemini.New("gemini", geminiKey, geminiModel)
+		r.RegisterProvider(gem)
+		r.AddRoute(router.Route{ModelAlias: "gemini", Providers: []string{"gemini"}})
+		slog.Info("real provider registered", "provider", "gemini", "model", geminiModel, "route", "gemini")
+	}
 
 	keycloakIssuer := os.Getenv("KEYCLOAK_ISSUER")
 	if keycloakIssuer == "" {

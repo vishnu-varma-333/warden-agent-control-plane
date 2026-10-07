@@ -751,3 +751,85 @@ consistent. Found only because the full containerized stack was actually
 run end to end, which is the entire reason that verification step
 existed in this milestone rather than stopping at "docker build
 succeeded."
+
+## 2026-10-07 — Gemini, not OpenAI/Anthropic, closes the real-provider gap
+
+**Context:** milestone 2's real provider integration was deferred since
+day one for the obvious reason — it needs a funded account. Asked
+directly, the answer was Gemini specifically, because Google AI Studio
+issues free-tier API keys with no card required, unlike OpenAI/
+Anthropic.
+
+**Built:** `internal/provider/gemini` — the plain REST API
+(`generativelanguage.googleapis.com`), not the full Go SDK, since this
+project only needs chat + streaming, not the SDK's much larger surface.
+Registered in `cmd/gateway/main.go` only when `GEMINI_API_KEY` is set, as
+a genuinely separate route (`gemini`) alongside the existing mock routes
+— nothing about local dev without a key changes.
+
+**A real, moving-target problem this surfaced:** Gemini's model names
+churn fast. `gemini-2.0-flash` (a reasonable guess), `gemini-3.8-flash`
+(what a 404 error on that one suggested), and `gemini-2.5-flash-lite`
+(the next-most-obvious choice) were ALL already retired by the time this
+was tested, each pointing at a different "use this instead." Only by
+calling `GET /v1beta/models` and cross-checking against which one
+actually returned a response (not just a non-404) did `gemini-3.5-flash-
+lite` turn out to be live. Documented here because the next person
+reading this code and finding it broken should check the model listing
+before assuming the integration itself regressed — this is Gemini's own
+model lifecycle, not a code bug.
+
+**Verified live:** a real non-streaming AND real streaming
+`/v1/chat/completions` call, through the full stack (real token
+exchange, real policy enforcement, real routing/caching), got back a
+real Gemini-generated answer both times — not a mocked response.
+
+## 2026-10-07 — found via live re-run: three real bugs in `cmd/killtest`, none of them in the product
+
+Re-running the kill test at the spec's actual target (1,000 runs, not
+the 100 benchmarked in milestone 10) failed 100% of iterations at first
+— worth recording in full because none of the three causes were in
+Warden itself; all three were in the test harness, and each one would
+have silently stayed broken without actually trying to run it at scale.
+
+**Bug 1 — a stale binary, not a new bug at all.** `control-api` was
+still running a build from before `internal/approval.Detail` gained an
+`IdempotencyKey` field (added this same session, for bug 3 below). Every
+symptom chased before finding this — approvals seemingly vanishing,
+`findPendingApproval` failing despite the row existing in Postgres with
+the exact right key — traced back to one missed rebuild. The lesson worth
+keeping: when a control-api-backed check starts failing right after
+changing `internal/approval`, rebuild control-api before suspecting the
+logic.
+
+**Bug 2 — `os.Exit(1)` inside `run()`, not in `main()`.** The harness
+reported its final lost/duplicated count and called `os.Exit(1)`
+directly whenever either was nonzero — skipping `run()`'s own
+`defer gw.Process.Kill()`, since `os.Exit` terminates the process
+immediately without unwinding the stack. Every run that ended with ANY
+failure orphaned its gateway child process, which then sat on the same
+port for the NEXT invocation to collide with — turning one bad run into
+a confusing cascade across every run after it, including runs that
+looked unrelated. Fixed by returning a plain error from `run()` and
+letting `main()` decide the exit code only after `run()` (and its defer)
+has already completed.
+
+**Bug 3 — `findPendingApproval` trusted "the only pending delete_data
+approval," which stopped being true at any real concurrency.** A
+previous iteration's fire-and-forget goroutine can still be reconnecting
+after its gateway was killed, independent of the main loop having moved
+on to a new iteration — real RFC 8693 token exchange added a second
+genuine network round trip to every token fetch that didn't exist when
+this harness was first proven at n=100, shifting timing enough to expose
+it. Fixed by exposing `idempotencyKey` on `GET /approvals` and matching
+each iteration against its own key, not "whichever pending approval
+comes first" — plus polling for up to 3s instead of a single fixed-delay
+check, and always killing/restarting the gateway before moving to the
+next iteration regardless of whether this one succeeded, so one slow
+iteration can no longer cascade into the rest.
+
+**Result once all three were fixed, run for real:** 1,000/1,000 executed
+exactly once, 0 lost, 0 duplicated — the spec's literal target, not the
+100-run proxy milestone 10 shipped with. Cross-checked against
+`demo-mcp-server`'s own independent execution counter, same as every
+other kill-test result in this project.

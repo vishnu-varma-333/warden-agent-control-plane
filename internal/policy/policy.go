@@ -64,6 +64,12 @@ const DefaultSeedPolicy = `permit(
 
 permit(
     principal,
+    action == Warden::Action::"CallModel",
+    resource == Warden::Model::"gemini"
+);
+
+permit(
+    principal,
     action == Warden::Action::"CallTool",
     resource == Warden::Tool::"echo"
 );

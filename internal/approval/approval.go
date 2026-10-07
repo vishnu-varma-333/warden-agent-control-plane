@@ -52,17 +52,18 @@ type Approval struct {
 // the console, eventually) — Approval stays the minimal shape Request/
 // WaitForDecision pass around internally.
 type Detail struct {
-	ID           string          `json:"id"`
-	AgentID      string          `json:"agentId"`
-	ActingAs     string          `json:"actingAs"`
-	Action       string          `json:"action"`
-	ResourceType string          `json:"resourceType"`
-	ResourceID   string          `json:"resourceId"`
-	State        string          `json:"state"`
-	DecidedBy    *string         `json:"decidedBy,omitempty"`
-	ExecutedAt   *time.Time      `json:"executedAt,omitempty"`
-	ExpiresAt    time.Time       `json:"expiresAt"`
-	CreatedAt    time.Time       `json:"createdAt"`
+	ID             string     `json:"id"`
+	IdempotencyKey *string    `json:"idempotencyKey,omitempty"`
+	AgentID        string     `json:"agentId"`
+	ActingAs       string     `json:"actingAs"`
+	Action         string     `json:"action"`
+	ResourceType   string     `json:"resourceType"`
+	ResourceID     string     `json:"resourceId"`
+	State          string     `json:"state"`
+	DecidedBy      *string    `json:"decidedBy,omitempty"`
+	ExecutedAt     *time.Time `json:"executedAt,omitempty"`
+	ExpiresAt      time.Time  `json:"expiresAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 type Notifier interface {
@@ -330,10 +331,10 @@ func (m *Manager) ExpireOverdue(ctx context.Context) (int64, error) {
 func (m *Manager) Get(ctx context.Context, approvalID string) (Detail, error) {
 	var d Detail
 	err := m.db.QueryRowContext(ctx, `
-		SELECT id, agent_id, acting_as, action, resource_type, resource_id,
+		SELECT id, idempotency_key, agent_id, acting_as, action, resource_type, resource_id,
 		       state, decided_by, executed_at, expires_at, created_at
 		FROM approvals WHERE id = $1`, approvalID,
-	).Scan(&d.ID, &d.AgentID, &d.ActingAs, &d.Action, &d.ResourceType, &d.ResourceID,
+	).Scan(&d.ID, &d.IdempotencyKey, &d.AgentID, &d.ActingAs, &d.Action, &d.ResourceType, &d.ResourceID,
 		&d.State, &d.DecidedBy, &d.ExecutedAt, &d.ExpiresAt, &d.CreatedAt)
 	if err != nil {
 		return Detail{}, fmt.Errorf("approval: get: %w", err)
@@ -344,7 +345,7 @@ func (m *Manager) Get(ctx context.Context, approvalID string) (Detail, error) {
 // List returns approvals in a given state (or every approval if state is
 // empty), most recent first.
 func (m *Manager) List(ctx context.Context, state string) ([]Detail, error) {
-	query := `SELECT id, agent_id, acting_as, action, resource_type, resource_id,
+	query := `SELECT id, idempotency_key, agent_id, acting_as, action, resource_type, resource_id,
 	                  state, decided_by, executed_at, expires_at, created_at
 	           FROM approvals`
 	args := []any{}
@@ -363,7 +364,7 @@ func (m *Manager) List(ctx context.Context, state string) ([]Detail, error) {
 	var out []Detail
 	for rows.Next() {
 		var d Detail
-		if err := rows.Scan(&d.ID, &d.AgentID, &d.ActingAs, &d.Action, &d.ResourceType, &d.ResourceID,
+		if err := rows.Scan(&d.ID, &d.IdempotencyKey, &d.AgentID, &d.ActingAs, &d.Action, &d.ResourceType, &d.ResourceID,
 			&d.State, &d.DecidedBy, &d.ExecutedAt, &d.ExpiresAt, &d.CreatedAt); err != nil {
 			return nil, fmt.Errorf("approval: list scan: %w", err)
 		}
